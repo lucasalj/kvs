@@ -35,7 +35,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         )
         .get_matches();
 
-    let mut _kv_store = KvStore::new();
+    let mut _kv_store = KvStore::open("./");
 
     match matches.subcommand() {
         ("set", Some(_)) => {
