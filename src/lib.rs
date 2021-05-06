@@ -77,14 +77,18 @@ impl KvStore {
     /// }
     /// ```
     pub fn set(&mut self, key: String, value: String) -> Result<()> {
-        let cmd = Command::Set {
+        self.write_cmd_to_file(Command::Set {
             key: key.clone(),
             value: value.clone(),
-        };
-        let cmd_serialized = bincode::serialize(&cmd)?;
-        self.log_file.write_all(&*cmd_serialized)?;
+        })?;
         self.data_index.insert(key, value);
 
+        Ok(())
+    }
+
+    fn write_cmd_to_file(&mut self, cmd: Command) -> Result<()> {
+        let cmd_serialized = bincode::serialize(&cmd)?;
+        self.log_file.write_all(&*cmd_serialized)?;
         Ok(())
     }
 
@@ -96,28 +100,39 @@ impl KvStore {
     ///
     /// ```
     /// use kvs::KvStore;
-    /// let mut user_data = KvStore::new();
+    /// let mut user_data = KvStore::open("./db.log").unwrap();
     /// user_data.set("name".to_owned(), "John".to_owned());
     /// user_data.set("age".to_owned(), "21".to_owned());
-    /// assert_eq!(user_data.get("name".to_owned()), Some("John".to_owned()));
-    /// assert_eq!(user_data.get("mother's name".to_ownedBox<bincode::ErrorKind>()), None);
+    /// assert_eq!(user_data.get("name".to_owned()).unwrap(), Some("John".to_owned()));
     /// ```
-    pub fn get(&mut self, _key: String) -> Result<Option<String>> {
-        // self.data.get(&key).map(|v| v.to_owned())
-        panic!("unimplemented");
+    pub fn get(&mut self, key: String) -> Result<Option<String>> {
+        if !self.is_index_built {
+            self.build_index()?;
+        }
+        Ok(self.data_index.get(&key).and_then(|val| Some(val.clone())))
     }
 
-    fn build_index(&mut self) {
+    fn build_index(&mut self) -> Result<()> {
         let mut reader = BufReader::new(&self.log_file);
-        while let bincode::Result::Ok(cmd) = bincode::deserialize_from(&mut reader) {
-            match cmd {
-                Command::Set { key, value } => {
+        loop {
+            let res = bincode::deserialize_from::<_, Command>(&mut reader);
+            match res {
+                Ok(Command::Set { key, value }) => {
                     self.data_index.insert(key, value);
                 }
-                Command::Remove { key } => {
+                Ok(Command::Remove { key }) => {
                     self.data_index.remove(&*key);
                 }
-            };
+                Err(err) => match *err {
+                    bincode::ErrorKind::Io(ref bincode_io_err) => match bincode_io_err.kind() {
+                        std::io::ErrorKind::UnexpectedEof => {
+                            return Ok(());
+                        }
+                        _ => return Err(KvStoreError::from(err)),
+                    },
+                    _ => return Err(KvStoreError::from(err)),
+                },
+            }
         }
     }
 
@@ -137,11 +152,9 @@ impl KvStore {
     /// ```
     pub fn remove(&mut self, key: String) -> Result<()> {
         if !self.is_index_built {
-            self.build_index();
+            self.build_index()?;
         }
-        let cmd = Command::Remove { key: key.clone() };
-        let cmd_serialized = bincode::serialize(&cmd)?;
-        self.log_file.write_all(&*cmd_serialized)?;
+        self.write_cmd_to_file(Command::Remove { key: key.clone() })?;
 
         if let None = self.data_index.remove(&key) {
             Err(KvStoreError::RemoveNonExistentKey)
@@ -159,7 +172,10 @@ impl KvStore {
     /// use kvs::KvStore;
     /// let dictionary = KvStore::new();
     /// ```
-    pub fn open<P: Into<PathBuf>>(path: P) -> Result<Self> {
+    pub fn open<P>(path: P) -> Result<Self>
+    where
+        P: Into<PathBuf>,
+    {
         let path = (path.into() as PathBuf).join(LOG_FILE_NAME);
         Ok(KvStore {
             data_index: HashMap::new(),

@@ -3,8 +3,6 @@ extern crate clap;
 use clap::{App, Arg, SubCommand};
 use kvs::{KvStore, Result};
 
-use core::panic;
-
 fn main() -> Result<()> {
     let matches = App::new(crate_name!())
         .version(crate_version!())
@@ -46,14 +44,17 @@ fn main() -> Result<()> {
             };
             kv_store.set(key, value)?;
         }
-        ("get", Some(_)) => {
-            // let key = m.value_of("KEY").unwrap().to_owned();
-            // if let Some(val) = kv_store.get(key) {
-            //     println!("{}", &val);
-            // } else {
-            //     std::process::exit(1);
-            // }
-            panic!("unimplemented");
+        ("get", Some(m)) => {
+            let key = m.value_of("KEY").unwrap().to_owned();
+            match kv_store.get(key) {
+                Ok(None) => {
+                    println!("Key not found");
+                }
+                Ok(Some(val)) => {
+                    println!("{}", &val);
+                }
+                _ => std::process::exit(1),
+            }
         }
         ("rm", Some(m)) => {
             let key = m.value_of("KEY").unwrap();
