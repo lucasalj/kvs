@@ -1,18 +1,57 @@
-#![deny(missing_docs)]
+// #![deny(missing_docs)]
 
 //! This crate is composed of KvStore data structure and its methods
 
-use std::result;
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::HashMap,
+    fs::OpenOptions,
+    io::{BufReader, Write},
+};
+use std::{path::PathBuf, result};
+
+#[macro_use]
+extern crate failure;
+
+use serde::{Deserialize, Serialize};
+
+const LOG_FILE_NAME: &str = "db.log";
 
 /// An error type for any errors returned by the KvStore API
-#[derive(Debug)]
-pub enum KvStoreError {}
+#[derive(Debug, Fail)]
+pub enum KvStoreError {
+    #[fail(display = "Bincode error: {}.", _0)]
+    Bincode(#[cause] bincode::Error),
+    #[fail(display = "Io error: {}.", _0)]
+    Io(#[cause] std::io::Error),
+    #[fail(display = "Tried to remove a non existent key in the database")]
+    RemoveNonExistentKey,
+}
+
+impl From<bincode::Error> for KvStoreError {
+    fn from(error: bincode::Error) -> Self {
+        Self::Bincode(error)
+    }
+}
+
+impl From<std::io::Error> for KvStoreError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+enum Command {
+    Set { key: String, value: String },
+    Remove { key: String },
+}
 
 /// Data structure that implements a key-value store
 #[derive(Debug)]
 pub struct KvStore {
-    data: HashMap<String, String>,
+    data_index: HashMap<String, String>,
+    log_file_path: PathBuf,
+    log_file: std::fs::File,
+    is_index_built: bool,
 }
 
 /// An alias for the result type that includes the common error type
@@ -26,17 +65,27 @@ impl KvStore {
     ///
     /// ```
     /// use kvs::KvStore;
-    /// let mut user_data = KvStore::new();
-    /// user_data.set("name".to_owned(), "John".to_owned());
-    /// user_data.set("age".to_owned(), "21".to_owned());
-    /// assert_eq!(user_data.get("name".to_owned()), Some("John".to_owned()));
+    /// use kvs::Result;
     ///
-    /// user_data.set("age".to_owned(), "22".to_owned());
-    /// assert_eq!(user_data.get("age".to_owned()), Some("22".to_owned()));
+    /// if let Ok(ref mut user_data) = KvStore::open("./db.log") {
+    ///     user_data.set("name".to_owned(), "John".to_owned());
+    ///     user_data.set("age".to_owned(), "21".to_owned());
+    ///     assert_eq!(user_data.get("name".to_owned()).unwrap(), Some("John".to_owned()));
+    ///
+    ///     user_data.set("age".to_owned(), "22".to_owned());
+    ///     assert_eq!(user_data.get("age".to_owned()).unwrap(), Some("22".to_owned()));
+    /// }
     /// ```
-    pub fn set(&mut self, _key: String, _value: String) -> Result<()> {
-        // self.data.insert(key, value);
-        panic!("unimplemented");
+    pub fn set(&mut self, key: String, value: String) -> Result<()> {
+        let cmd = Command::Set {
+            key: key.clone(),
+            value: value.clone(),
+        };
+        let cmd_serialized = bincode::serialize(&cmd)?;
+        self.log_file.write_all(&*cmd_serialized)?;
+        self.data_index.insert(key, value);
+
+        Ok(())
     }
 
     /// Get the string value of a string `key`.
@@ -51,11 +100,25 @@ impl KvStore {
     /// user_data.set("name".to_owned(), "John".to_owned());
     /// user_data.set("age".to_owned(), "21".to_owned());
     /// assert_eq!(user_data.get("name".to_owned()), Some("John".to_owned()));
-    /// assert_eq!(user_data.get("mother's name".to_owned()), None);
+    /// assert_eq!(user_data.get("mother's name".to_ownedBox<bincode::ErrorKind>()), None);
     /// ```
     pub fn get(&mut self, _key: String) -> Result<Option<String>> {
         // self.data.get(&key).map(|v| v.to_owned())
         panic!("unimplemented");
+    }
+
+    fn build_index(&mut self) {
+        let mut reader = BufReader::new(&self.log_file);
+        while let bincode::Result::Ok(cmd) = bincode::deserialize_from(&mut reader) {
+            match cmd {
+                Command::Set { key, value } => {
+                    self.data_index.insert(key, value);
+                }
+                Command::Remove { key } => {
+                    self.data_index.remove(&*key);
+                }
+            };
+        }
     }
 
     /// Remove a given `key`.
@@ -72,9 +135,19 @@ impl KvStore {
     /// user_data.remove("name".to_owned());
     /// assert_eq!(user_data.get("name".to_owned()), None);
     /// ```
-    pub fn remove(&mut self, _key: String) -> Result<()> {
-        // self.data.remove(&key);
-        panic!("unimplemented");
+    pub fn remove(&mut self, key: String) -> Result<()> {
+        if !self.is_index_built {
+            self.build_index();
+        }
+        let cmd = Command::Remove { key: key.clone() };
+        let cmd_serialized = bincode::serialize(&cmd)?;
+        self.log_file.write_all(&*cmd_serialized)?;
+
+        if let None = self.data_index.remove(&key) {
+            Err(KvStoreError::RemoveNonExistentKey)
+        } else {
+            Ok(())
+        }
     }
 
     /// Open the KvStore at a given `path`.
@@ -85,12 +158,18 @@ impl KvStore {
     /// ```
     /// use kvs::KvStore;
     /// let dictionary = KvStore::new();
-    ///
     /// ```
-    pub fn open(_path: impl Into<PathBuf>) -> Result<Self> {
-        // KvStore {
-        //     data: HashMap::new(),
-        // }
-        panic!("unimplemented");
+    pub fn open<P: Into<PathBuf>>(path: P) -> Result<Self> {
+        let path = (path.into() as PathBuf).join(LOG_FILE_NAME);
+        Ok(KvStore {
+            data_index: HashMap::new(),
+            log_file_path: path.clone(),
+            log_file: OpenOptions::new()
+                .create(true)
+                .append(true)
+                .read(true)
+                .open(path)?,
+            is_index_built: false,
+        })
     }
 }

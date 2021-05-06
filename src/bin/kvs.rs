@@ -1,12 +1,11 @@
 #[macro_use]
 extern crate clap;
 use clap::{App, Arg, SubCommand};
-use kvs::KvStore;
+use kvs::{KvStore, Result};
 
 use core::panic;
-use std::error::Error;
 
-fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> Result<()> {
     let matches = App::new(crate_name!())
         .version(crate_version!())
         .author(crate_authors!())
@@ -35,18 +34,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         )
         .get_matches();
 
-    let mut _kv_store = KvStore::open("./");
+    let mut kv_store = KvStore::open("./")?;
 
     match matches.subcommand() {
-        ("set", Some(_)) => {
-            // let (key, value) = (|m: &ArgMatches| {
-            //     (
-            //         m.value_of("KEY").unwrap().to_owned(),
-            //         m.value_of("VALUE").unwrap().to_owned(),
-            //     )
-            // })(m);
-            // kv_store.set(key, value);
-            panic!("unimplemented");
+        ("set", Some(m)) => {
+            let (key, value) = {
+                (
+                    m.value_of("KEY").unwrap().to_owned(),
+                    m.value_of("VALUE").unwrap().to_owned(),
+                )
+            };
+            kv_store.set(key, value)?;
         }
         ("get", Some(_)) => {
             // let key = m.value_of("KEY").unwrap().to_owned();
@@ -57,11 +55,14 @@ fn main() -> Result<(), Box<dyn Error>> {
             // }
             panic!("unimplemented");
         }
-        ("rm", Some(_)) => {
-            // let key = m.value_of("KEY").unwrap();
-            // kv_store.remove(key.into());
-            panic!("unimplemented");
+        ("rm", Some(m)) => {
+            let key = m.value_of("KEY").unwrap();
+            if let Err(kvs::KvStoreError::RemoveNonExistentKey) = kv_store.remove(key.into()) {
+                println!("Key not found");
+                std::process::exit(1);
+            }
         }
         _ => std::process::exit(1),
-    }
+    };
+    Ok(())
 }
