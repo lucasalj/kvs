@@ -1,0 +1,26 @@
+# Compaction Strategy
+- Log file names will have a common prefix, followed by the datetime utc (in the format `%Y%m%d%H%M%S`) they were created, followed by a common suffix.
+- In-memory index will be a table from `keys` to `index: {file\_name, offset}`.
+- The index will always be built at startup (KvStore::open).
+- There will be two constants to trigger the compaction algorithm: `CMD\_KEY\_FACTOR` and `CMDS_THRESHOLD`.
+- To be able to know when to trigger compaction using the constants, KvStore will have to keep a counter of the total number of cmds written on all log files.
+- Compaction will be triggered when: `total_number_of_commands` > `CMDS_THRESHOLD` && `total_number_of_commands` / `total_number_of_keys_in_memory` > `CMD_KEY_FACTOR`.
+- There will be another constant to trigger the creation of a new log file: `CMDS_CURR_FILE_THRESHOLD`.
+- To be able to know when to trigger the creation of a new log file, KvStore will have to keep a counter of the total number of cmds written on the current log file.
+- The creation of a new log file will be triggered when: `total_number_of_commands_curr_file` > `CMDS_CURR_FILE_THRESHOLD`.
+- KvStore::open will always create a new file after building the index.
+- After writting a command to the log file, the algorithm will check the predicate for compaction to be triggered and deal with it. Then it will check for the predicate for the creation of a new log file and deal with that.
+- The compaction strategy will be:
+  - List all the `file\_name`s that match the log file name format in the log directory.
+  - Turn the list of `file\_name`s to a list of structures of the form `file\_keys: {file\_name, keys}` where the initial value for all `keys`s will be vec![].
+  - For each entry in the in-memory index that has a matching `file\_name` with the `file\_keys.file\_name` push that `key` into `file\_keys.keys`.
+  - Sort all `file\_keys` by the `file\_keys.keys.len()` in the ascending order.
+  - While the predicate for triggering compaction holds:
+    - Pop the first `file\_keys`.
+    - Open the `file\_keys.file\_name` in read mode.
+    - For each `key` in `file\_keys.keys`:
+      - Read the `value` of the `key` using first the in-memory index to find the offset and then the read from file at the offset.
+      - Write the command to the current log file.
+      - Update the entry in the in-memory index.
+      - Check the predicate for the creation of a new log file and deal with that. (This can be optimized later)
+    - Close and delete the file with name: `file\_keys.file\_name`.
