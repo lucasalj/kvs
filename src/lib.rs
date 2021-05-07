@@ -5,7 +5,7 @@
 use std::{
     collections::HashMap,
     fs::OpenOptions,
-    io::{BufReader, Write},
+    io::{BufReader, Seek, SeekFrom, Write},
 };
 use std::{path::PathBuf, result};
 
@@ -23,8 +23,10 @@ pub enum KvStoreError {
     Bincode(#[cause] bincode::Error),
     #[fail(display = "Io error: {}.", _0)]
     Io(#[cause] std::io::Error),
-    #[fail(display = "Tried to remove a non existent key in the database")]
+    #[fail(display = "Tried to remove a non existent key in the database.")]
     RemoveNonExistentKey,
+    #[fail(display = "Wrong file offset. File must have been corrupted.")]
+    WrongFileOffset,
 }
 
 impl From<bincode::Error> for KvStoreError {
@@ -45,12 +47,21 @@ enum Command {
     Remove { key: String },
 }
 
+#[derive(Debug)]
+enum FileMode {
+    Read,
+    Append,
+    #[allow(dead_code)]
+    Write,
+}
+
 /// Data structure that implements a key-value store
 #[derive(Debug)]
 pub struct KvStore {
-    data_index: HashMap<String, String>,
+    data_index: HashMap<String, u64>,
     log_file_path: PathBuf,
     log_file: std::fs::File,
+    log_file_mode: FileMode,
     is_index_built: bool,
 }
 
@@ -77,16 +88,18 @@ impl KvStore {
     /// }
     /// ```
     pub fn set(&mut self, key: String, value: String) -> Result<()> {
+        let new_value_pos = self.log_file.seek(SeekFrom::End(0))?;
         self.write_cmd_to_file(Command::Set {
             key: key.clone(),
             value: value.clone(),
         })?;
-        self.data_index.insert(key, value);
+        self.data_index.insert(key, new_value_pos);
 
         Ok(())
     }
 
     fn write_cmd_to_file(&mut self, cmd: Command) -> Result<()> {
+        self.open_file_with_mode(FileMode::Append)?;
         let cmd_serialized = bincode::serialize(&cmd)?;
         self.log_file.write_all(&*cmd_serialized)?;
         Ok(())
@@ -109,16 +122,59 @@ impl KvStore {
         if !self.is_index_built {
             self.build_index()?;
         }
-        Ok(self.data_index.get(&key).and_then(|val| Some(val.clone())))
+        match self.data_index.get(&key).map(|v| v.clone()) {
+            Some(offset) => Ok(Some(self.read_value_from_log_at(offset.clone())?)),
+            None => Ok(None),
+        }
+    }
+
+    fn read_value_from_log_at(&mut self, offset: u64) -> Result<String> {
+        self.open_file_with_mode(FileMode::Read)?;
+        self.log_file.seek(SeekFrom::Start(offset))?;
+        let cmd = bincode::deserialize_from::<_, Command>(&self.log_file)?;
+        if let Command::Set { key: _, value } = cmd {
+            Ok(value)
+        } else {
+            Err(KvStoreError::WrongFileOffset)
+        }
+    }
+
+    fn open_file_with_mode(&mut self, mode: FileMode) -> Result<()> {
+        match (mode, &self.log_file_mode) {
+            (FileMode::Read, FileMode::Read) => {}
+            (FileMode::Read, _) => {
+                self.log_file = OpenOptions::new().read(true).open(&*self.log_file_path)?;
+                self.log_file_mode = FileMode::Read;
+            }
+            (FileMode::Append, FileMode::Append) => {}
+            (FileMode::Append, _) => {
+                self.log_file = OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .open(&*self.log_file_path)?;
+                self.log_file_mode = FileMode::Append;
+            }
+            (FileMode::Write, FileMode::Write) => {}
+            (FileMode::Write, _) => {
+                self.log_file = OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .open(&*self.log_file_path)?;
+                self.log_file_mode = FileMode::Append;
+            }
+        };
+        Ok(())
     }
 
     fn build_index(&mut self) -> Result<()> {
+        self.open_file_with_mode(FileMode::Read)?;
         let mut reader = BufReader::new(&self.log_file);
         loop {
+            let offset = reader.seek(SeekFrom::Current(0))?;
             let res = bincode::deserialize_from::<_, Command>(&mut reader);
             match res {
-                Ok(Command::Set { key, value }) => {
-                    self.data_index.insert(key, value);
+                Ok(Command::Set { key, value: _ }) => {
+                    self.data_index.insert(key, offset);
                 }
                 Ok(Command::Remove { key }) => {
                     self.data_index.remove(&*key);
@@ -180,11 +236,8 @@ impl KvStore {
         Ok(KvStore {
             data_index: HashMap::new(),
             log_file_path: path.clone(),
-            log_file: OpenOptions::new()
-                .create(true)
-                .append(true)
-                .read(true)
-                .open(path)?,
+            log_file: OpenOptions::new().append(true).create(true).open(path)?,
+            log_file_mode: FileMode::Append,
             is_index_built: false,
         })
     }
