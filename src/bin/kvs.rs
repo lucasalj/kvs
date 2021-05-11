@@ -32,6 +32,9 @@ fn main() -> Result<()> {
         )
         .get_matches();
 
+    if matches.subcommand.is_none() {
+        std::process::exit(1);
+    }
     let mut kv_store = KvStore::open("./")?;
 
     match matches.subcommand() {

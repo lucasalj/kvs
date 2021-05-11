@@ -1,4 +1,4 @@
-/// An error type for any errors returned by the KvStore API
+/// An error type for describing any kind of error returned by the KvStore API
 #[derive(Debug, Fail)]
 pub enum KvStoreError {
     /// An error that came from bincode crate

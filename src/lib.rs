@@ -1,6 +1,6 @@
-// #![deny(missing_docs)]
+#![deny(missing_docs)]
 
-//! This crate is composed of KvStore data structure and its methods
+//! The kvs crate provides a persistent key-value store with a user-friendly interface.
 
 #[macro_use]
 extern crate failure;
