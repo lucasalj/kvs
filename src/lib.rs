@@ -1,4 +1,4 @@
-#![deny(missing_docs)]
+// #![deny(missing_docs)]
 
 //! The kvs crate provides a persistent key-value store with a user-friendly interface.
 
@@ -6,7 +6,9 @@
 extern crate failure;
 
 pub use error::*;
+pub use kvsengine::*;
 pub use kvstore::*;
 
 mod error;
+mod kvsengine;
 mod kvstore;
