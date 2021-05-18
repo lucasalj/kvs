@@ -2,7 +2,6 @@
 extern crate clap;
 
 use clap::{App, Arg};
-use itertools::Itertools;
 use kvs::Result;
 
 #[macro_use]
@@ -11,11 +10,14 @@ extern crate slog_async;
 extern crate slog_term;
 use slog::Drain;
 
-const DEFAULT_SERVER_IP: &'static str = "127.0.0.1";
-const DEFAULT_SERVER_PORT: &'static str = "4000";
+const DEFAULT_SERVER_IP_PORT: &'static str = "127.0.0.1:4000";
 
 fn main() -> Result<()> {
-    let default_ip_port = format!("{}:{}", DEFAULT_SERVER_IP, DEFAULT_SERVER_PORT);
+    let is_valid_addr = |v: String| {
+        v.parse::<std::net::SocketAddr>()
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    };
     let app = App::new(crate_name!())
         .version(crate_version!())
         .author(crate_authors!())
@@ -25,7 +27,8 @@ fn main() -> Result<()> {
             .value_name("IP-PORT")
             .help("Sets the server IP address, either v4 or v6, and port number, with the format IP:PORT")
             .takes_value(true)
-            .default_value(default_ip_port.as_str()),
+            .default_value(DEFAULT_SERVER_IP_PORT)
+            .validator(is_valid_addr),
                Arg::with_name("engine")
             .long("engine")
             .value_name("ENGINE-NAME")
@@ -49,8 +52,15 @@ fn main() -> Result<()> {
     let drain = slog_async::Async::new(drain).build().fuse();
 
     let log = slog::Logger::root(drain, o!("version" => crate_version!()));
-    let server = log.new(o!("address" => server_addr, "engine" => engine));
+    let server = log.new(o!("address" => server_addr.clone(), "engine" => engine));
     info!(server, "starting");
+
+    let listener = std::net::TcpListener::bind(server_addr)?;
+    for stream in listener.incoming() {
+        let stream = stream?;
+        let peer_addr = stream.peer_addr()?;
+        debug!(server, "acceppted connection"; "peer" => peer_addr);
+    }
 
     Ok(())
 }
