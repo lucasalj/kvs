@@ -1,3 +1,5 @@
+use failure::Fail;
+
 /// An error type for describing any kind of error returned by the KvStore API
 #[derive(Debug, Fail)]
 pub enum KvStoreError {
@@ -33,5 +35,11 @@ impl From<std::io::Error> for KvStoreError {
 impl From<walkdir::Error> for KvStoreError {
     fn from(error: walkdir::Error) -> Self {
         Self::Walkdir(error)
+    }
+}
+
+impl From<KvStoreError> for std::boxed::Box<dyn std::error::Error> {
+    fn from(err: KvStoreError) -> Self {
+        err.compat().into()
     }
 }

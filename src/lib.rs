@@ -9,6 +9,7 @@ pub use error::*;
 pub use kvsengine::*;
 pub use kvstore::*;
 
+pub mod cp;
 mod error;
 mod kvsengine;
 mod kvstore;
