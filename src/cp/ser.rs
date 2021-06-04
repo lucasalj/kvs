@@ -22,6 +22,17 @@ impl<'ser> Serializer<'ser> {
     }
 }
 
+/// Serialize the `value` into the `bytes` slice
+///
+/// # Examples
+/// ```
+/// use kvs::cp::to_bytes;
+/// let a = 5u32;
+/// let mut buf = [0u8; 4];
+/// let a_ser = to_bytes(&a, &mut buf);
+/// assert!(a_ser.is_ok());
+/// assert_eq!(buf, [0, 0, 0, 5]);
+/// ```
 pub fn to_bytes<'ser, T>(value: &T, bytes: &'ser mut [u8]) -> Result<(), Error>
 where
     T: serde::Serialize,
@@ -31,6 +42,16 @@ where
     Ok(())
 }
 
+/// Calculates size of the `value` as if it were serialized
+///
+/// # Example
+/// ```
+/// use kvs::cp::calc_len;
+/// let v = vec![1u32, 2, 3, 4];
+/// let v_len = calc_len(&v);
+/// assert!(v_len.is_ok());
+/// assert_eq!(v_len.unwrap(), 20);
+/// ```
 pub fn calc_len<T>(value: &T) -> Result<usize, Error>
 where
     T: serde::Serialize,

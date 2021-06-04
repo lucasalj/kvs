@@ -1,4 +1,13 @@
 //! Key-Value Store Communication Protocol (KVSCP)
+//! The messages communicated in this protocol follows the format.
+//! Byte index(es) from the MSB to LSB: Meaning
+//! 0: ProtocolHeader
+//! 1: MessageType (Bit7 => 0: Request, 1: Response; Bits[0..6] => Command)
+//! 2-: The actual payload content
+
+//! Note: All the length fields in the protocol are read as unsigned 32 bit integers.
+//! All the numeric values are (de)serialized in big endian format.
+
 pub use de::from_bytes;
 pub use ser::{calc_len, to_bytes};
 
@@ -12,18 +21,114 @@ use num_derive::{FromPrimitive, ToPrimitive};
 use num_traits::{FromPrimitive, ToPrimitive};
 use serde::ser::SerializeTuple;
 
-const PROTOCOL_HEADER: u8 = 0xC1;
+/// Every message in the protocol must start with the following byte
+pub const PROTOCOL_HEADER: u8 = 0xC1;
 
+/// Message format for commands used in communication between kvs server and client
 #[derive(Debug, Serialize, Deserialize, PartialEq, PartialOrd, Eq, Ord)]
 pub struct Message {
     header: u8,
     payload: MessagePayload,
 }
 
+/// A enum to distinguish between messages sent from the client to the server (requests)
+/// and messages sent from the serer to the client (responses)
 #[derive(Debug, PartialEq, PartialOrd, Eq, Ord)]
 pub enum MessagePayload {
+    /// Messages in the direction client to server have a `Request` payload
     Request(Request),
+
+    /// Messages in the direction server to client have a `Response` payload
     Response(Response),
+}
+
+/// The payload of a `Request` message
+#[derive(Debug, PartialEq, PartialOrd, Eq, Ord)]
+pub enum Request {
+    /// Request of the type `Set` Command
+    Set(RequestSet),
+
+    /// Request of the type `Get` Command
+    Get(RequestGet),
+
+    /// Request of the type `Remove` Command
+    Remove(RequestRemove),
+}
+
+/// A Request for a `Set` Command
+#[derive(Debug, Serialize, Deserialize, PartialEq, PartialOrd, Eq, Ord)]
+pub struct RequestSet {
+    key: String,
+    value: String,
+}
+
+/// A Request for a `Get` Command
+#[derive(Debug, Serialize, Deserialize, PartialEq, PartialOrd, Eq, Ord)]
+pub struct RequestGet {
+    key: String,
+}
+
+/// A Request for a `Remove` Command
+#[derive(Debug, Serialize, Deserialize, PartialEq, PartialOrd, Eq, Ord)]
+pub struct RequestRemove {
+    key: String,
+}
+
+/// The payload of a `Response` message
+#[derive(Debug, PartialEq, PartialOrd, Eq, Ord)]
+pub enum Response {
+    /// Response of the type `Set` Command
+    Set(ResponseSet),
+
+    /// Response of the type `Get` Command
+    Get(ResponseGet),
+
+    /// Response of the type `Remove` Command
+    Remove(ResponseRemove),
+}
+
+/// A Response for a `Set` Command
+#[derive(Debug, Serialize, Deserialize, PartialEq, PartialOrd, Eq, Ord)]
+pub struct ResponseSet {
+    code: StatusCode,
+}
+
+/// A Response for a `Get` Command
+#[derive(Debug, Serialize, Deserialize, PartialEq, PartialOrd, Eq, Ord)]
+pub struct ResponseGet {
+    code: StatusCode,
+    value: Option<String>,
+}
+
+/// A Response for a `Remove` Command
+#[derive(Debug, Serialize, Deserialize, PartialEq, PartialOrd, Eq, Ord)]
+pub struct ResponseRemove {
+    code: StatusCode,
+}
+
+/// A Status code to be used in response messages to indicate if the command executed sucessfully or failed with which kind of error
+#[derive(Debug, PartialEq, PartialOrd, Eq, Ord, ToPrimitive, FromPrimitive)]
+#[repr(u8)]
+pub enum StatusCode {
+    /// Success status
+    Ok,
+
+    /// The operation failed because no such key was found in the database
+    KeyNotFound,
+
+    /// The operation failed with a fatal error on the server
+    FatalError,
+}
+
+impl Message {
+    /// header field getter
+    pub fn header(&self) -> u8 {
+        self.header
+    }
+    /// payload field getter
+    pub fn payload(&self) -> &MessagePayload {
+        &self.payload
+    }
 }
 
 impl std::convert::From<RequestSet> for MessagePayload {
@@ -62,111 +167,103 @@ impl std::convert::From<ResponseRemove> for MessagePayload {
     }
 }
 
-#[derive(Debug, PartialEq, PartialOrd, Eq, Ord)]
-pub enum Request {
-    Set(RequestSet),
-    Get(RequestGet),
-    Remove(RequestRemove),
-}
-
-#[derive(Debug, Serialize, Deserialize, PartialEq, PartialOrd, Eq, Ord)]
-pub struct RequestSet {
-    key: String,
-    value: String,
-}
-
-#[derive(Debug, Serialize, Deserialize, PartialEq, PartialOrd, Eq, Ord)]
-pub struct RequestGet {
-    key: String,
-}
-
-#[derive(Debug, Serialize, Deserialize, PartialEq, PartialOrd, Eq, Ord)]
-pub struct RequestRemove {
-    key: String,
-}
-
-#[derive(Debug, PartialEq, PartialOrd, Eq, Ord)]
-pub enum Response {
-    Set(ResponseSet),
-    Get(ResponseGet),
-    Remove(ResponseRemove),
-}
-
-#[derive(Debug, Serialize, Deserialize, PartialEq, PartialOrd, Eq, Ord)]
-pub struct ResponseSet {
-    code: StatusCode,
-}
-
-#[derive(Debug, Serialize, Deserialize, PartialEq, PartialOrd, Eq, Ord)]
-pub struct ResponseGet {
-    code: StatusCode,
-    value: String,
-}
-
-#[derive(Debug, Serialize, Deserialize, PartialEq, PartialOrd, Eq, Ord)]
-pub struct ResponseRemove {
-    code: StatusCode,
-}
-
-#[derive(Debug, PartialEq, PartialOrd, Eq, Ord, ToPrimitive, FromPrimitive)]
-#[repr(u8)]
-pub enum StatusCode {
-    Ok,
-    KeyNotFound,
-    FatalError,
-}
-
 impl RequestSet {
+    /// Instantiate a new request message for the `Set` command
     pub fn new_message(key: String, value: String) -> Message {
         Message {
             header: PROTOCOL_HEADER,
             payload: MessagePayload::Request(Request::Set(RequestSet { key, value })),
         }
     }
+
+    /// Get a reference to the request set's key.
+    pub fn key(&self) -> &str {
+        self.key.as_str()
+    }
+
+    /// Get a reference to the request set's value.
+    pub fn value(&self) -> &str {
+        self.value.as_str()
+    }
 }
 
 impl RequestGet {
+    /// Instantiate a new request message for the `Get` command
     pub fn new_message(key: String) -> Message {
         Message {
             header: PROTOCOL_HEADER,
             payload: MessagePayload::Request(Request::Get(RequestGet { key })),
         }
     }
+
+    /// Get a reference to the request get's key.
+    pub fn key(&self) -> &str {
+        self.key.as_str()
+    }
 }
 
 impl RequestRemove {
+    /// Instantiate a new request message for the `Remove` command
     pub fn new_message(key: String) -> Message {
         Message {
             header: PROTOCOL_HEADER,
             payload: MessagePayload::Request(Request::Remove(RequestRemove { key })),
         }
     }
+
+    /// Get a reference to the request remove's key.
+    pub fn key(&self) -> &str {
+        self.key.as_str()
+    }
 }
 
 impl ResponseSet {
+    /// Instantiate a new reponse message for the `Set` command
     pub fn new_message(code: StatusCode) -> Message {
         Message {
             header: PROTOCOL_HEADER,
             payload: MessagePayload::Response(Response::Set(ResponseSet { code })),
         }
     }
+
+    /// Get a reference to the response set's code.
+    pub fn code(&self) -> &StatusCode {
+        &self.code
+    }
 }
 
 impl ResponseGet {
-    pub fn new_message(code: StatusCode, value: String) -> Message {
+    /// Instantiate a new reponse message for the `Get` command
+    pub fn new_message(code: StatusCode, value: Option<String>) -> Message {
         Message {
             header: PROTOCOL_HEADER,
             payload: MessagePayload::Response(Response::Get(ResponseGet { code, value })),
         }
     }
+
+    /// Get a reference to the response get's code.
+    pub fn code(&self) -> &StatusCode {
+        &self.code
+    }
+
+    /// Get a reference to the response get's value.
+    pub fn value(&self) -> Option<&String> {
+        self.value.as_ref()
+    }
 }
 
 impl ResponseRemove {
+    /// Instantiate a new reponse message for the `Remove` command
     pub fn new_message(code: StatusCode) -> Message {
         Message {
             header: PROTOCOL_HEADER,
             payload: MessagePayload::Response(Response::Remove(ResponseRemove { code })),
         }
+    }
+
+    /// Get a reference to the response remove's code.
+    pub fn code(&self) -> &StatusCode {
+        &self.code
     }
 }
 #[derive(FromPrimitive)]
@@ -189,10 +286,8 @@ where
     T: serde::Serialize,
     S: serde::Serializer,
 {
-    let payload_len = calc_len(content).map_err(serde::ser::Error::custom)? as u32;
-    let mut s = serializer.serialize_tuple(3)?;
+    let mut s = serializer.serialize_tuple(2)?;
     s.serialize_element(&(msg_type as u8))?;
-    s.serialize_element(&payload_len)?;
     s.serialize_element(content)?;
     s.end()
 }
@@ -225,6 +320,24 @@ impl serde::ser::Serialize for MessagePayload {
     }
 }
 
+fn deserialize_payload<'de, V, A, T>(visitor: &V, mut seq: A) -> Result<T, A::Error>
+where
+    T: serde::ser::Serialize + serde::de::Deserialize<'de>,
+    V: serde::de::Visitor<'de>,
+    A: serde::de::SeqAccess<'de>,
+{
+    let val = seq
+        .next_element::<T>()
+        .map_err(serde::de::Error::custom)
+        .and_then(|o| {
+            o.ok_or(serde::de::Error::invalid_type(
+                serde::de::Unexpected::Other("?"),
+                &*visitor,
+            ))
+        })?;
+    Ok(val)
+}
+
 impl<'de> serde::de::Deserialize<'de> for MessagePayload {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -251,93 +364,27 @@ impl<'de> serde::de::Deserialize<'de> for MessagePayload {
                         &"an message type discriminant",
                     ))? {
                         MessageType::ReqSet => {
-                            let next_bytes = seq
-                                .next_element::<Vec<u8>>()
-                                .map_err(serde::de::Error::custom)
-                                .and_then(|o| {
-                                    o.ok_or(serde::de::Error::invalid_type(
-                                        serde::de::Unexpected::Other("?"),
-                                        &self,
-                                    ))
-                                })?;
-
-                            let val: Result<RequestSet, _> = from_bytes(&next_bytes[..])
-                                .map_err(|err| serde::de::Error::custom(err.to_string()));
+                            let val: Result<RequestSet, _> = deserialize_payload(&self, seq);
                             Ok(MessagePayload::from(val?))
                         }
                         MessageType::ReqGet => {
-                            let next_bytes = seq
-                                .next_element::<Vec<u8>>()
-                                .map_err(serde::de::Error::custom)
-                                .and_then(|o| {
-                                    o.ok_or(serde::de::Error::invalid_type(
-                                        serde::de::Unexpected::Other("?"),
-                                        &self,
-                                    ))
-                                })?;
-
-                            let val: Result<RequestGet, _> = from_bytes(&next_bytes[..])
-                                .map_err(|err| serde::de::Error::custom(err.to_string()));
+                            let val: Result<RequestGet, _> = deserialize_payload(&self, seq);
                             Ok(MessagePayload::from(val?))
                         }
                         MessageType::ReqRemove => {
-                            let next_bytes = seq
-                                .next_element::<Vec<u8>>()
-                                .map_err(serde::de::Error::custom)
-                                .and_then(|o| {
-                                    o.ok_or(serde::de::Error::invalid_type(
-                                        serde::de::Unexpected::Other("?"),
-                                        &self,
-                                    ))
-                                })?;
-
-                            let val: Result<RequestRemove, _> = from_bytes(&next_bytes[..])
-                                .map_err(|err| serde::de::Error::custom(err.to_string()));
+                            let val: Result<RequestRemove, _> = deserialize_payload(&self, seq);
                             Ok(MessagePayload::from(val?))
                         }
                         MessageType::RespSet => {
-                            let next_bytes = seq
-                                .next_element::<Vec<u8>>()
-                                .map_err(serde::de::Error::custom)
-                                .and_then(|o| {
-                                    o.ok_or(serde::de::Error::invalid_type(
-                                        serde::de::Unexpected::Other("?"),
-                                        &self,
-                                    ))
-                                })?;
-
-                            let val: Result<ResponseSet, _> = from_bytes(&next_bytes[..])
-                                .map_err(|err| serde::de::Error::custom(err.to_string()));
+                            let val: Result<ResponseSet, _> = deserialize_payload(&self, seq);
                             Ok(MessagePayload::from(val?))
                         }
                         MessageType::RespGet => {
-                            let next_bytes = seq
-                                .next_element::<Vec<u8>>()
-                                .map_err(serde::de::Error::custom)
-                                .and_then(|o| {
-                                    o.ok_or(serde::de::Error::invalid_type(
-                                        serde::de::Unexpected::Other("?"),
-                                        &self,
-                                    ))
-                                })?;
-
-                            let val: Result<ResponseGet, _> = from_bytes(&next_bytes[..])
-                                .map_err(|err| serde::de::Error::custom(err.to_string()));
+                            let val: Result<ResponseGet, _> = deserialize_payload(&self, seq);
                             Ok(MessagePayload::from(val?))
                         }
                         MessageType::RespRemove => {
-                            let next_bytes = seq
-                                .next_element::<Vec<u8>>()
-                                .map_err(serde::de::Error::custom)
-                                .and_then(|o| {
-                                    o.ok_or(serde::de::Error::invalid_type(
-                                        serde::de::Unexpected::Other("?"),
-                                        &self,
-                                    ))
-                                })?;
-
-                            let val: Result<ResponseRemove, _> = from_bytes(&next_bytes[..])
-                                .map_err(|err| serde::de::Error::custom(err.to_string()));
+                            let val: Result<ResponseRemove, _> = deserialize_payload(&self, seq);
                             Ok(MessagePayload::from(val?))
                         }
                     };
@@ -398,8 +445,8 @@ impl<'de> serde::de::Deserialize<'de> for StatusCode {
 fn test_serde_request_set() {
     let cmd = RequestSet::new_message("key".to_owned(), "value".to_owned());
     let expected_serialized = vec![
-        0xC1, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x03, b'k', b'e', b'y', 0x00, 0x00,
-        0x00, 0x05, b'v', b'a', b'l', b'u', b'e',
+        0xC1, 0x00, 0x00, 0x00, 0x00, 0x03, b'k', b'e', b'y', 0x00, 0x00, 0x00, 0x05, b'v', b'a',
+        b'l', b'u', b'e',
     ];
 
     let mut write_buf = Vec::new();
@@ -419,9 +466,7 @@ fn test_serde_request_set() {
 #[test]
 fn test_serde_request_get() {
     let cmd = RequestGet::new_message("key".to_owned());
-    let expected_serialized = vec![
-        0xC1, 0x01, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x03, b'k', b'e', b'y',
-    ];
+    let expected_serialized = vec![0xC1, 0x01, 0x00, 0x00, 0x00, 0x03, b'k', b'e', b'y'];
 
     let mut write_buf = Vec::new();
     let cmd_len = calc_len(&cmd);
@@ -440,9 +485,7 @@ fn test_serde_request_get() {
 #[test]
 fn test_serde_request_rm() {
     let cmd = RequestRemove::new_message("key".to_owned());
-    let expected_serialized = vec![
-        0xC1, 0x02, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x03, b'k', b'e', b'y',
-    ];
+    let expected_serialized = vec![0xC1, 0x02, 0x00, 0x00, 0x00, 0x03, b'k', b'e', b'y'];
 
     let mut write_buf = Vec::new();
     let cmd_len = calc_len(&cmd);
@@ -461,7 +504,7 @@ fn test_serde_request_rm() {
 #[test]
 fn test_serde_response_set() {
     let cmd = ResponseSet::new_message(StatusCode::Ok);
-    let expected_serialized = vec![0xC1, 0x80, 0x00, 0x00, 0x00, 0x01, 0x00];
+    let expected_serialized = vec![0xC1, 0x80, 0x00];
 
     let mut write_buf = Vec::new();
     let cmd_len = calc_len(&cmd);
@@ -479,10 +522,9 @@ fn test_serde_response_set() {
 
 #[test]
 fn test_serde_response_get() {
-    let cmd = ResponseGet::new_message(StatusCode::Ok, "value".to_string());
+    let cmd = ResponseGet::new_message(StatusCode::Ok, Some("value".to_string()));
     let expected_serialized = vec![
-        0xC1, 0x81, 0x00, 0x00, 0x00, 0x0A, 0x00, 0x00, 0x00, 0x00, 0x05, b'v', b'a', b'l', b'u',
-        b'e',
+        0xC1, 0x81, 0x00, 0x01, 0x00, 0x00, 0x00, 0x05, b'v', b'a', b'l', b'u', b'e',
     ];
 
     let mut write_buf = Vec::new();
@@ -502,7 +544,7 @@ fn test_serde_response_get() {
 #[test]
 fn test_serde_response_rm() {
     let cmd = ResponseRemove::new_message(StatusCode::Ok);
-    let expected_serialized = vec![0xC1, 0x82, 0x00, 0x00, 0x00, 0x01, 0x00];
+    let expected_serialized = vec![0xC1, 0x82, 0x00];
 
     let mut write_buf = Vec::new();
     let cmd_len = calc_len(&cmd);

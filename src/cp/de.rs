@@ -103,6 +103,16 @@ impl<'de> Deserializer<'de> {
     }
 }
 
+/// Deserialize a value of type `T` from the `bytes` slice
+///
+/// # Examples
+/// ```
+/// use kvs::cp::from_bytes;
+/// let buf = [0x00u8, 0x00, 0x00, 0x0A];
+/// let x: Result<u32,_ > = from_bytes(&buf);
+/// assert!(x.is_ok());
+/// assert_eq!(x.unwrap(), 10);
+/// ```
 pub fn from_bytes<'de, T>(bytes: &'de [u8]) -> Result<T, Error>
 where
     T: serde::Deserialize<'de>,
