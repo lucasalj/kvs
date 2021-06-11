@@ -91,14 +91,15 @@ impl KvStore {
     /// use kvs::KvStore;
     /// use kvs::Result;
     ///
-    /// if let Ok(ref mut user_data) = KvStore::open("./") {
-    ///     user_data.set("name".to_owned(), "John".to_owned());
-    ///     user_data.set("age".to_owned(), "21".to_owned());
-    ///     assert_eq!(user_data.get("name".to_owned()).unwrap(), Some("John".to_owned()));
+    /// let user_data = KvStore::open("./");
+    /// assert!(user_data.is_ok());
+    /// let mut user_data = user_data.unwrap();
+    /// user_data.set("name".to_owned(), "John".to_owned());
+    /// user_data.set("age".to_owned(), "21".to_owned());
+    /// assert_eq!(user_data.get("name".to_owned()).unwrap(), Some("John".to_owned()));
     ///
-    ///     user_data.set("age".to_owned(), "22".to_owned());
-    ///     assert_eq!(user_data.get("age".to_owned()).unwrap(), Some("22".to_owned()));
-    /// }
+    /// user_data.set("age".to_owned(), "22".to_owned());
+    /// assert_eq!(user_data.get("age".to_owned()).unwrap(), Some("22".to_owned()));
     /// ```
     pub fn set(&mut self, key: String, value: String) -> Result<()> {
         let new_index = CommandIndex {

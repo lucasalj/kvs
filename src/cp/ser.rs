@@ -1,6 +1,8 @@
+//! Serialize from KVSCP structs into raw bytes in the KVSCP data format
+
 use super::error::Error;
 
-pub struct Serializer<'ser> {
+struct Serializer<'ser> {
     buf: &'ser mut [u8],
     wr_idx: usize,
 }
@@ -421,7 +423,7 @@ impl<'ser: 'a, 'a> serde::ser::SerializeStructVariant for &'a mut Serializer<'se
     }
 }
 
-pub struct SizeSerializer {
+struct SizeSerializer {
     total_len: usize,
 }
 

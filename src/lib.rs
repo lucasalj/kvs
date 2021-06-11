@@ -1,4 +1,4 @@
-// #![deny(missing_docs)]
+#![deny(missing_docs)]
 
 //! The kvs crate provides a persistent key-value store with a user-friendly interface.
 

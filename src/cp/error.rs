@@ -1,11 +1,23 @@
+//! Deals with errors that happen while serializing to and deserializing from KVSCP data format
+
 use std::string::FromUtf8Error;
 
+/// An error type returned by protocol (De)Serialization operations
 #[derive(Debug, Clone, PartialEq)]
 pub enum Error {
+    /// Custom error
     Message(String),
+
+    /// Error from an IO operation
     IoError(String),
+
+    /// Error in conversion between raw bytes and UTF-8
     InvalidUtf8Encoding(std::str::Utf8Error),
+
+    /// Error when there is not enough space in writer buffer to serialize the object
     NotEnoughSpaceInBuffer,
+
+    /// Unexpected end-of-file encountered while deserializing
     Eof,
 }
 

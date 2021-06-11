@@ -1,11 +1,51 @@
 #[macro_use]
 extern crate clap;
+
 use clap::{App, Arg, SubCommand};
-use kvs::{KvStore, Result};
+use kvs::cp::{de, ser, Message, StatusCode};
+use smallvec::{smallvec, SmallVec};
+use std::{
+    io::{Read, Write},
+    net::TcpStream,
+};
 
 const DEFAULT_SERVER_IP_PORT: &'static str = "127.0.0.1:4000";
 
-fn main() -> Result<()> {
+fn send_request(
+    msg: &kvs::cp::Message,
+    stream: &mut TcpStream,
+) -> Result<(), kvs::cp::error::Error> {
+    let mut buf = SmallVec::<[u8; 1024]>::new();
+    buf.resize(ser::calc_len(msg)?, 0u8);
+    ser::to_bytes(msg, &mut buf[..])?;
+    let mut idx = 0usize;
+    loop {
+        idx += stream.write(&buf[idx..])?;
+        if idx == buf.len() {
+            break;
+        }
+    }
+    Ok(())
+}
+
+const RECV_ATTEMPTS: usize = 10;
+
+fn recv_response(stream: &mut TcpStream) -> Result<Message, kvs::cp::error::Error> {
+    let mut buf: SmallVec<[u8; 1024]> = smallvec![0; 1024];
+    let mut idx = 0usize;
+    let mut attempts = 0;
+    loop {
+        idx += stream.read(&mut buf[idx..])?;
+        let res: Result<Message, _> = de::from_bytes(&buf[..idx]);
+        if res.is_err() && attempts < RECV_ATTEMPTS {
+            attempts += 1;
+            continue;
+        }
+        return res;
+    }
+}
+
+fn main() -> std::result::Result<(), std::boxed::Box<dyn std::error::Error>> {
     let is_valid_addr = |v: String| {
         v.parse::<std::net::SocketAddr>()
             .map(|_| ())
@@ -64,63 +104,91 @@ fn main() -> Result<()> {
     if matches.subcommand.is_none() {
         std::process::exit(1);
     }
-    let mut kv_store = KvStore::open("./")?;
 
     match matches.subcommand() {
         ("set", Some(m)) => {
-            // let (key, value) = {
-            //     (
-            //         m.value_of("KEY").unwrap().to_owned(),
-            //         m.value_of("VALUE").unwrap().to_owned(),
-            //     )
-            // };
-            // kv_store.set(key, value)?;
             let server_addr = m
                 .value_of("addr")
                 .unwrap()
                 .parse::<std::net::SocketAddr>()
                 .unwrap();
-            let _stream = std::net::TcpStream::connect_timeout(
+            let mut stream = std::net::TcpStream::connect_timeout(
                 &server_addr,
                 std::time::Duration::from_secs(3),
             )?;
+            let msg = kvs::cp::RequestSet::new_message(
+                m.value_of("KEY").unwrap().to_owned(),
+                m.value_of("VALUE").unwrap().to_owned(),
+            );
+            send_request(&msg, &mut stream)?;
+            let resp = recv_response(&mut stream)?;
+            match resp.payload() {
+                kvs::cp::MessagePayload::Response(kvs::cp::Response::Set(r)) => match r.code() {
+                    StatusCode::KeyNotFound => {
+                        println!("Key not found");
+                        std::process::exit(1);
+                    }
+                    StatusCode::FatalError => std::process::exit(1),
+                    StatusCode::Ok => {}
+                },
+                _ => std::process::exit(1),
+            }
         }
         ("get", Some(m)) => {
-            // let key = m.value_of("KEY").unwrap().to_owned();
-            // match kv_store.get(key) {
-            //     Ok(None) => {
-            //         println!("Key not found");
-            //     }
-            //     Ok(Some(val)) => {
-            //         println!("{}", &val);
-            //     }
-            //     _ => std::process::exit(1),
-            // }
             let server_addr = m
                 .value_of("addr")
                 .unwrap()
                 .parse::<std::net::SocketAddr>()
                 .unwrap();
-            let _stream = std::net::TcpStream::connect_timeout(
+            let mut stream = std::net::TcpStream::connect_timeout(
                 &server_addr,
                 std::time::Duration::from_secs(3),
             )?;
+            let msg = kvs::cp::RequestGet::new_message(m.value_of("KEY").unwrap().to_owned());
+            send_request(&msg, &mut stream)?;
+            let resp = recv_response(&mut stream)?;
+            match resp.payload() {
+                kvs::cp::MessagePayload::Response(kvs::cp::Response::Get(r)) => match r.code() {
+                    StatusCode::KeyNotFound => {
+                        println!("Key not found");
+                        std::process::exit(1);
+                    }
+                    StatusCode::FatalError => std::process::exit(1),
+                    StatusCode::Ok => match r.value() {
+                        Some(s) => println!("{}", s),
+                        None => {
+                            println!("Key not found");
+                            std::process::exit(1);
+                        }
+                    },
+                },
+                _ => std::process::exit(1),
+            }
         }
         ("rm", Some(m)) => {
-            // let key = m.value_of("KEY").unwrap();
-            // if let Err(kvs::KvStoreError::RemoveNonExistentKey) = kv_store.remove(key.into()) {
-            //     println!("Key not found");
-            //     std::process::exit(1);
-            // }
             let server_addr = m
                 .value_of("addr")
                 .unwrap()
                 .parse::<std::net::SocketAddr>()
                 .unwrap();
-            let _stream = std::net::TcpStream::connect_timeout(
+            let mut stream = std::net::TcpStream::connect_timeout(
                 &server_addr,
                 std::time::Duration::from_secs(3),
             )?;
+            let msg = kvs::cp::RequestRemove::new_message(m.value_of("KEY").unwrap().to_owned());
+            send_request(&msg, &mut stream)?;
+            let resp = recv_response(&mut stream)?;
+            match resp.payload() {
+                kvs::cp::MessagePayload::Response(kvs::cp::Response::Set(r)) => match r.code() {
+                    StatusCode::KeyNotFound => {
+                        println!("Key not found");
+                        std::process::exit(1);
+                    }
+                    StatusCode::FatalError => std::process::exit(1),
+                    StatusCode::Ok => {}
+                },
+                _ => std::process::exit(1),
+            }
         }
         _ => std::process::exit(1),
     };

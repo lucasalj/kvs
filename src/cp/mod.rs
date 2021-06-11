@@ -8,12 +8,9 @@
 //! Note: All the length fields in the protocol are read as unsigned 32 bit integers.
 //! All the numeric values are (de)serialized in big endian format.
 
-pub use de::from_bytes;
-pub use ser::{calc_len, to_bytes};
-
-mod de;
-mod error;
-mod ser;
+pub mod de;
+pub mod error;
+pub mod ser;
 
 use serde::{Deserialize, Serialize};
 
@@ -27,6 +24,7 @@ pub const PROTOCOL_HEADER: u8 = 0xC1;
 /// Message format for commands used in communication between kvs server and client
 #[derive(Debug, Serialize, Deserialize, PartialEq, PartialOrd, Eq, Ord)]
 pub struct Message {
+    #[serde(deserialize_with = "deserialize_check_header")]
     header: u8,
     payload: MessagePayload,
 }
@@ -266,6 +264,54 @@ impl ResponseRemove {
         &self.code
     }
 }
+
+fn deserialize_check_header<'de, D>(deserializer: D) -> Result<u8, D::Error>
+where
+    D: serde::de::Deserializer<'de>,
+{
+    struct ProtocolHeaderVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for ProtocolHeaderVisitor {
+        type Value = u8;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("protocol header")
+        }
+
+        fn visit_u8<E>(self, v: u8) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            if v == PROTOCOL_HEADER {
+                Ok(v)
+            } else {
+                Err(serde::de::Error::invalid_value(
+                    serde::de::Unexpected::Unsigned(v as u64),
+                    &self,
+                ))
+            }
+        }
+    }
+
+    deserializer.deserialize_u8(ProtocolHeaderVisitor {})
+}
+
+impl<T> std::convert::From<&std::result::Result<T, super::KvStoreError>> for StatusCode
+where
+    T: std::fmt::Debug,
+{
+    fn from(res: &std::result::Result<T, super::KvStoreError>) -> Self {
+        if res.is_ok() {
+            StatusCode::Ok
+        } else {
+            match res.as_ref().unwrap_err() {
+                super::KvStoreError::RemoveNonExistentKey => StatusCode::KeyNotFound,
+                _ => StatusCode::FatalError,
+            }
+        }
+    }
+}
+
 #[derive(FromPrimitive)]
 #[repr(u8)]
 enum MessageType {
@@ -450,15 +496,15 @@ fn test_serde_request_set() {
     ];
 
     let mut write_buf = Vec::new();
-    let cmd_len = calc_len(&cmd);
+    let cmd_len = ser::calc_len(&cmd);
     assert!(cmd_len.is_ok());
     write_buf.resize(cmd_len.unwrap(), 0);
 
-    let write_res = to_bytes(&cmd, &mut write_buf[..]);
+    let write_res = ser::to_bytes(&cmd, &mut write_buf[..]);
     assert!(write_res.is_ok());
 
     assert_eq!(write_buf, expected_serialized);
-    let cmd_deserialized: Result<Message, _> = from_bytes(&write_buf[..]);
+    let cmd_deserialized: Result<Message, _> = de::from_bytes(&write_buf[..]);
     assert!(cmd_deserialized.is_ok());
     assert_eq!(cmd_deserialized.unwrap(), cmd);
 }
@@ -469,15 +515,15 @@ fn test_serde_request_get() {
     let expected_serialized = vec![0xC1, 0x01, 0x00, 0x00, 0x00, 0x03, b'k', b'e', b'y'];
 
     let mut write_buf = Vec::new();
-    let cmd_len = calc_len(&cmd);
+    let cmd_len = ser::calc_len(&cmd);
     assert!(cmd_len.is_ok());
     write_buf.resize(cmd_len.unwrap(), 0);
 
-    let write_res = to_bytes(&cmd, &mut write_buf[..]);
+    let write_res = ser::to_bytes(&cmd, &mut write_buf[..]);
     assert!(write_res.is_ok());
 
     assert_eq!(write_buf, expected_serialized);
-    let cmd_deserialized: Result<Message, _> = from_bytes(&write_buf[..]);
+    let cmd_deserialized: Result<Message, _> = de::from_bytes(&write_buf[..]);
     assert!(cmd_deserialized.is_ok());
     assert_eq!(cmd_deserialized.unwrap(), cmd);
 }
@@ -488,15 +534,15 @@ fn test_serde_request_rm() {
     let expected_serialized = vec![0xC1, 0x02, 0x00, 0x00, 0x00, 0x03, b'k', b'e', b'y'];
 
     let mut write_buf = Vec::new();
-    let cmd_len = calc_len(&cmd);
+    let cmd_len = ser::calc_len(&cmd);
     assert!(cmd_len.is_ok());
     write_buf.resize(cmd_len.unwrap(), 0);
 
-    let write_res = to_bytes(&cmd, &mut write_buf[..]);
+    let write_res = ser::to_bytes(&cmd, &mut write_buf[..]);
     assert!(write_res.is_ok());
 
     assert_eq!(write_buf, expected_serialized);
-    let cmd_deserialized: Result<Message, _> = from_bytes(&write_buf[..]);
+    let cmd_deserialized: Result<Message, _> = de::from_bytes(&write_buf[..]);
     assert!(cmd_deserialized.is_ok());
     assert_eq!(cmd_deserialized.unwrap(), cmd);
 }
@@ -507,15 +553,15 @@ fn test_serde_response_set() {
     let expected_serialized = vec![0xC1, 0x80, 0x00];
 
     let mut write_buf = Vec::new();
-    let cmd_len = calc_len(&cmd);
+    let cmd_len = ser::calc_len(&cmd);
     assert!(cmd_len.is_ok());
     write_buf.resize(cmd_len.unwrap(), 0);
 
-    let write_res = to_bytes(&cmd, &mut write_buf[..]);
+    let write_res = ser::to_bytes(&cmd, &mut write_buf[..]);
     assert!(write_res.is_ok());
 
     assert_eq!(write_buf, expected_serialized);
-    let cmd_deserialized: Result<Message, _> = from_bytes(&write_buf[..]);
+    let cmd_deserialized: Result<Message, _> = de::from_bytes(&write_buf[..]);
     assert!(cmd_deserialized.is_ok());
     assert_eq!(cmd_deserialized.unwrap(), cmd);
 }
@@ -528,15 +574,15 @@ fn test_serde_response_get() {
     ];
 
     let mut write_buf = Vec::new();
-    let cmd_len = calc_len(&cmd);
+    let cmd_len = ser::calc_len(&cmd);
     assert!(cmd_len.is_ok());
     write_buf.resize(cmd_len.unwrap(), 0);
 
-    let write_res = to_bytes(&cmd, &mut write_buf[..]);
+    let write_res = ser::to_bytes(&cmd, &mut write_buf[..]);
     assert!(write_res.is_ok());
 
     assert_eq!(write_buf, expected_serialized);
-    let cmd_deserialized: Result<Message, _> = from_bytes(&write_buf[..]);
+    let cmd_deserialized: Result<Message, _> = de::from_bytes(&write_buf[..]);
     assert!(cmd_deserialized.is_ok());
     assert_eq!(cmd_deserialized.unwrap(), cmd);
 }
@@ -547,15 +593,15 @@ fn test_serde_response_rm() {
     let expected_serialized = vec![0xC1, 0x82, 0x00];
 
     let mut write_buf = Vec::new();
-    let cmd_len = calc_len(&cmd);
+    let cmd_len = ser::calc_len(&cmd);
     assert!(cmd_len.is_ok());
     write_buf.resize(cmd_len.unwrap(), 0);
 
-    let write_res = to_bytes(&cmd, &mut write_buf[..]);
+    let write_res = ser::to_bytes(&cmd, &mut write_buf[..]);
     assert!(write_res.is_ok());
 
     assert_eq!(write_buf, expected_serialized);
-    let cmd_deserialized: Result<Message, _> = from_bytes(&write_buf[..]);
+    let cmd_deserialized: Result<Message, _> = de::from_bytes(&write_buf[..]);
     assert!(cmd_deserialized.is_ok());
     assert_eq!(cmd_deserialized.unwrap(), cmd);
 }

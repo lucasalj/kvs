@@ -1,9 +1,11 @@
+//! Deserialize from raw bytes in KVSCP data format into KVSCP structs
+
 use serde::de::{DeserializeSeed, EnumAccess, IntoDeserializer, VariantAccess, Visitor};
 
 use super::error::Error;
 use std::str::FromStr;
 
-pub struct Deserializer<'de> {
+struct Deserializer<'de> {
     buf: &'de [u8],
     rd_idx: usize,
 }
