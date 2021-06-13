@@ -13,12 +13,11 @@ extern crate slog;
 extern crate slog_async;
 extern crate slog_term;
 
-use kvs::cp::{de, ser, Message, StatusCode};
+use kvs::cp::{de, ser, Header, MessagePayload, StatusCode, HEADER_SIZE};
 use slog::Drain;
 use smallvec::{smallvec, SmallVec};
 
 const DEFAULT_SERVER_IP_PORT: &'static str = "127.0.0.1:4000";
-const RECV_ATTEMPTS: usize = 10;
 
 fn send_response(
     msg: &kvs::cp::Message,
@@ -37,19 +36,15 @@ fn send_response(
     Ok(())
 }
 
-fn recv_request(stream: &mut TcpStream) -> Result<Message, kvs::cp::error::Error> {
-    let mut buf: SmallVec<[u8; 1024]> = smallvec![0; 1024];
-    let mut idx = 0usize;
-    let mut attempts = 0;
-    loop {
-        idx += stream.read(&mut buf[idx..])?;
-        let res: Result<Message, _> = de::from_bytes(&buf[..idx]);
-        if res.is_err() && attempts < RECV_ATTEMPTS {
-            attempts += 1;
-            continue;
-        }
-        return res;
-    }
+fn recv_payload(stream: &mut TcpStream) -> Result<MessagePayload, kvs::cp::error::Error> {
+    let mut header_buf = [0u8; HEADER_SIZE];
+    stream.read_exact(&mut header_buf)?;
+    let header: Result<Header, _> = de::from_bytes(&header_buf);
+    let header = header?;
+
+    let mut payload_buf: SmallVec<[u8; 1024]> = smallvec![0; header.payload_length() as usize];
+    stream.read_exact(&mut payload_buf)?;
+    de::from_bytes(&payload_buf)
 }
 
 fn main() -> Result<(), std::boxed::Box<dyn std::error::Error>> {
@@ -100,10 +95,10 @@ fn main() -> Result<(), std::boxed::Box<dyn std::error::Error>> {
     let listener = std::net::TcpListener::bind(server_addr)?;
     for stream in listener.incoming() {
         let mut stream = stream?;
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(3)))?;
         let peer_addr = stream.peer_addr()?;
         info!(server, "acceppted connection"; "peer" => peer_addr);
-        let msg = recv_request(&mut stream)?;
-        match msg.payload() {
+        match recv_payload(&mut stream)? {
             kvs::cp::MessagePayload::Request(kvs::cp::Request::Set(req)) => {
                 info!(server, "received message"; "peer" => peer_addr, "payload_type" => "RequestSet", "key" => req.key(), "value" => req.value());
                 let res = kvs.set(req.key().to_owned(), req.value().to_owned());

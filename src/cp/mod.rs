@@ -12,21 +12,47 @@ pub mod de;
 pub mod error;
 pub mod ser;
 
-use serde::{Deserialize, Serialize};
-
-use num_derive::{FromPrimitive, ToPrimitive};
 use num_traits::{FromPrimitive, ToPrimitive};
 use serde::ser::SerializeTuple;
+use serde::{Deserialize, Serialize};
 
 /// Every message in the protocol must start with the following byte
-pub const PROTOCOL_HEADER: u8 = 0xC1;
+pub const PROTOCOL_VERSION: u8 = 0xC1;
+
+/// The fixed size of the header for every message of the protocol
+pub const HEADER_SIZE: usize = 5;
 
 /// Message format for commands used in communication between kvs server and client
-#[derive(Debug, Serialize, Deserialize, PartialEq, PartialOrd, Eq, Ord)]
+#[derive(Debug, PartialEq, PartialOrd, Eq, Ord)]
 pub struct Message {
-    #[serde(deserialize_with = "deserialize_check_header")]
-    header: u8,
     payload: MessagePayload,
+}
+
+/// The header of the message. It includes the version and total payloand length
+#[derive(Debug, Serialize, Deserialize, PartialEq, PartialOrd, Eq, Ord)]
+pub struct Header {
+    protocol_version: u8,
+    payload_length: u32,
+}
+
+impl Header {
+    /// Constructs a new instance of Header
+    pub fn new() -> Self {
+        Header {
+            protocol_version: PROTOCOL_VERSION,
+            payload_length: 0,
+        }
+    }
+
+    /// Get header's protocol version.
+    pub fn protocol_version(&self) -> u8 {
+        self.protocol_version
+    }
+
+    /// Get header's payload length.
+    pub fn payload_length(&self) -> u32 {
+        self.payload_length
+    }
 }
 
 /// A enum to distinguish between messages sent from the client to the server (requests)
@@ -105,24 +131,20 @@ pub struct ResponseRemove {
 }
 
 /// A Status code to be used in response messages to indicate if the command executed sucessfully or failed with which kind of error
-#[derive(Debug, PartialEq, PartialOrd, Eq, Ord, ToPrimitive, FromPrimitive)]
+#[derive(Debug, PartialEq, PartialOrd, Eq, Ord, Primitive)]
 #[repr(u8)]
 pub enum StatusCode {
     /// Success status
-    Ok,
+    Ok = 0,
 
     /// The operation failed because no such key was found in the database
-    KeyNotFound,
+    KeyNotFound = 1,
 
     /// The operation failed with a fatal error on the server
-    FatalError,
+    FatalError = 2,
 }
 
 impl Message {
-    /// header field getter
-    pub fn header(&self) -> u8 {
-        self.header
-    }
     /// payload field getter
     pub fn payload(&self) -> &MessagePayload {
         &self.payload
@@ -169,7 +191,6 @@ impl RequestSet {
     /// Instantiate a new request message for the `Set` command
     pub fn new_message(key: String, value: String) -> Message {
         Message {
-            header: PROTOCOL_HEADER,
             payload: MessagePayload::Request(Request::Set(RequestSet { key, value })),
         }
     }
@@ -189,7 +210,6 @@ impl RequestGet {
     /// Instantiate a new request message for the `Get` command
     pub fn new_message(key: String) -> Message {
         Message {
-            header: PROTOCOL_HEADER,
             payload: MessagePayload::Request(Request::Get(RequestGet { key })),
         }
     }
@@ -204,7 +224,6 @@ impl RequestRemove {
     /// Instantiate a new request message for the `Remove` command
     pub fn new_message(key: String) -> Message {
         Message {
-            header: PROTOCOL_HEADER,
             payload: MessagePayload::Request(Request::Remove(RequestRemove { key })),
         }
     }
@@ -219,7 +238,6 @@ impl ResponseSet {
     /// Instantiate a new reponse message for the `Set` command
     pub fn new_message(code: StatusCode) -> Message {
         Message {
-            header: PROTOCOL_HEADER,
             payload: MessagePayload::Response(Response::Set(ResponseSet { code })),
         }
     }
@@ -234,7 +252,6 @@ impl ResponseGet {
     /// Instantiate a new reponse message for the `Get` command
     pub fn new_message(code: StatusCode, value: Option<String>) -> Message {
         Message {
-            header: PROTOCOL_HEADER,
             payload: MessagePayload::Response(Response::Get(ResponseGet { code, value })),
         }
     }
@@ -254,7 +271,6 @@ impl ResponseRemove {
     /// Instantiate a new reponse message for the `Remove` command
     pub fn new_message(code: StatusCode) -> Message {
         Message {
-            header: PROTOCOL_HEADER,
             payload: MessagePayload::Response(Response::Remove(ResponseRemove { code })),
         }
     }
@@ -263,37 +279,6 @@ impl ResponseRemove {
     pub fn code(&self) -> &StatusCode {
         &self.code
     }
-}
-
-fn deserialize_check_header<'de, D>(deserializer: D) -> Result<u8, D::Error>
-where
-    D: serde::de::Deserializer<'de>,
-{
-    struct ProtocolHeaderVisitor;
-
-    impl<'de> serde::de::Visitor<'de> for ProtocolHeaderVisitor {
-        type Value = u8;
-
-        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-            formatter.write_str("protocol header")
-        }
-
-        fn visit_u8<E>(self, v: u8) -> Result<Self::Value, E>
-        where
-            E: serde::de::Error,
-        {
-            if v == PROTOCOL_HEADER {
-                Ok(v)
-            } else {
-                Err(serde::de::Error::invalid_value(
-                    serde::de::Unexpected::Unsigned(v as u64),
-                    &self,
-                ))
-            }
-        }
-    }
-
-    deserializer.deserialize_u8(ProtocolHeaderVisitor {})
 }
 
 impl<T> std::convert::From<&std::result::Result<T, super::KvStoreError>> for StatusCode
@@ -312,15 +297,15 @@ where
     }
 }
 
-#[derive(FromPrimitive)]
+#[derive(Primitive)]
 #[repr(u8)]
 enum MessageType {
     ReqSet = 0,
-    ReqGet,
-    ReqRemove,
-    RespSet = (1u8 << 7),
-    RespGet,
-    RespRemove,
+    ReqGet = 1,
+    ReqRemove = 2,
+    RespSet = 0x80,
+    RespGet = 0x81,
+    RespRemove = 0x82,
 }
 
 fn serialize_content<T, S>(
@@ -336,6 +321,54 @@ where
     s.serialize_element(&(msg_type as u8))?;
     s.serialize_element(content)?;
     s.end()
+}
+
+impl serde::ser::Serialize for Message {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let payload_length =
+            ser::calc_len(&self.payload).map_err(|e| serde::ser::Error::custom(e.to_string()))?;
+        let mut s = serializer.serialize_tuple(3)?;
+        s.serialize_element(&PROTOCOL_VERSION)?;
+        s.serialize_element(&(payload_length as u32))?;
+        s.serialize_element(&self.payload)?;
+        s.end()
+    }
+}
+
+impl<'de> serde::de::Deserialize<'de> for Message {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct MessageVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for MessageVisitor {
+            type Value = Message;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a struct Message")
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                seq.next_element::<Header>()?
+                    .ok_or(serde::de::Error::missing_field(
+                        "an protocol version number (u8)",
+                    ))?;
+                let payload = seq.next_element::<MessagePayload>()?.ok_or(
+                    serde::de::Error::missing_field("a payload length number (u32)"),
+                )?;
+                Ok(Message { payload })
+            }
+        }
+
+        deserializer.deserialize_tuple(2, MessageVisitor {})
+    }
 }
 
 impl serde::ser::Serialize for MessagePayload {
@@ -491,8 +524,8 @@ impl<'de> serde::de::Deserialize<'de> for StatusCode {
 fn test_serde_request_set() {
     let cmd = RequestSet::new_message("key".to_owned(), "value".to_owned());
     let expected_serialized = vec![
-        0xC1, 0x00, 0x00, 0x00, 0x00, 0x03, b'k', b'e', b'y', 0x00, 0x00, 0x00, 0x05, b'v', b'a',
-        b'l', b'u', b'e',
+        0xC1, 0x00, 0x00, 0x00, 0x11, 0x00, 0x00, 0x00, 0x00, 0x03, b'k', b'e', b'y', 0x00, 0x00,
+        0x00, 0x05, b'v', b'a', b'l', b'u', b'e',
     ];
 
     let mut write_buf = Vec::new();
@@ -512,7 +545,9 @@ fn test_serde_request_set() {
 #[test]
 fn test_serde_request_get() {
     let cmd = RequestGet::new_message("key".to_owned());
-    let expected_serialized = vec![0xC1, 0x01, 0x00, 0x00, 0x00, 0x03, b'k', b'e', b'y'];
+    let expected_serialized = vec![
+        0xC1, 0x00, 0x00, 0x00, 0x08, 0x01, 0x00, 0x00, 0x00, 0x03, b'k', b'e', b'y',
+    ];
 
     let mut write_buf = Vec::new();
     let cmd_len = ser::calc_len(&cmd);
@@ -531,7 +566,9 @@ fn test_serde_request_get() {
 #[test]
 fn test_serde_request_rm() {
     let cmd = RequestRemove::new_message("key".to_owned());
-    let expected_serialized = vec![0xC1, 0x02, 0x00, 0x00, 0x00, 0x03, b'k', b'e', b'y'];
+    let expected_serialized = vec![
+        0xC1, 0x00, 0x00, 0x00, 0x08, 0x02, 0x00, 0x00, 0x00, 0x03, b'k', b'e', b'y',
+    ];
 
     let mut write_buf = Vec::new();
     let cmd_len = ser::calc_len(&cmd);
@@ -550,7 +587,7 @@ fn test_serde_request_rm() {
 #[test]
 fn test_serde_response_set() {
     let cmd = ResponseSet::new_message(StatusCode::Ok);
-    let expected_serialized = vec![0xC1, 0x80, 0x00];
+    let expected_serialized = vec![0xC1, 0x00, 0x00, 0x00, 0x02, 0x80, 0x00];
 
     let mut write_buf = Vec::new();
     let cmd_len = ser::calc_len(&cmd);
@@ -570,7 +607,8 @@ fn test_serde_response_set() {
 fn test_serde_response_get() {
     let cmd = ResponseGet::new_message(StatusCode::Ok, Some("value".to_string()));
     let expected_serialized = vec![
-        0xC1, 0x81, 0x00, 0x01, 0x00, 0x00, 0x00, 0x05, b'v', b'a', b'l', b'u', b'e',
+        0xC1, 0x00, 0x00, 0x00, 0x0C, 0x81, 0x00, 0x01, 0x00, 0x00, 0x00, 0x05, b'v', b'a', b'l',
+        b'u', b'e',
     ];
 
     let mut write_buf = Vec::new();
@@ -590,7 +628,7 @@ fn test_serde_response_get() {
 #[test]
 fn test_serde_response_rm() {
     let cmd = ResponseRemove::new_message(StatusCode::Ok);
-    let expected_serialized = vec![0xC1, 0x82, 0x00];
+    let expected_serialized = vec![0xC1, 0x00, 0x00, 0x00, 0x02, 0x82, 0x00];
 
     let mut write_buf = Vec::new();
     let cmd_len = ser::calc_len(&cmd);

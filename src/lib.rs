@@ -5,6 +5,10 @@
 #[macro_use]
 extern crate failure;
 
+#[macro_use]
+extern crate enum_primitive_derive;
+extern crate num_traits;
+
 pub use error::*;
 pub use kvsengine::*;
 pub use kvstore::*;

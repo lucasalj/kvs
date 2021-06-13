@@ -2,7 +2,7 @@
 extern crate clap;
 
 use clap::{App, Arg, SubCommand};
-use kvs::cp::{de, ser, Message, StatusCode};
+use kvs::cp::{de, ser, Header, MessagePayload, StatusCode, HEADER_SIZE};
 use smallvec::{smallvec, SmallVec};
 use std::{
     io::{Read, Write},
@@ -28,21 +28,15 @@ fn send_request(
     Ok(())
 }
 
-const RECV_ATTEMPTS: usize = 10;
+fn recv_payload(stream: &mut TcpStream) -> Result<MessagePayload, kvs::cp::error::Error> {
+    let mut header_buf = [0u8; HEADER_SIZE];
+    stream.read_exact(&mut header_buf)?;
+    let header: Result<Header, _> = de::from_bytes(&header_buf);
+    let header = header?;
 
-fn recv_response(stream: &mut TcpStream) -> Result<Message, kvs::cp::error::Error> {
-    let mut buf: SmallVec<[u8; 1024]> = smallvec![0; 1024];
-    let mut idx = 0usize;
-    let mut attempts = 0;
-    loop {
-        idx += stream.read(&mut buf[idx..])?;
-        let res: Result<Message, _> = de::from_bytes(&buf[..idx]);
-        if res.is_err() && attempts < RECV_ATTEMPTS {
-            attempts += 1;
-            continue;
-        }
-        return res;
-    }
+    let mut payload_buf: SmallVec<[u8; 1024]> = smallvec![0; header.payload_length() as usize];
+    stream.read_exact(&mut payload_buf)?;
+    de::from_bytes(&payload_buf)
 }
 
 fn main() -> std::result::Result<(), std::boxed::Box<dyn std::error::Error>> {
@@ -116,13 +110,13 @@ fn main() -> std::result::Result<(), std::boxed::Box<dyn std::error::Error>> {
                 &server_addr,
                 std::time::Duration::from_secs(3),
             )?;
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(3)))?;
             let msg = kvs::cp::RequestSet::new_message(
                 m.value_of("KEY").unwrap().to_owned(),
                 m.value_of("VALUE").unwrap().to_owned(),
             );
             send_request(&msg, &mut stream)?;
-            let resp = recv_response(&mut stream)?;
-            match resp.payload() {
+            match recv_payload(&mut stream)? {
                 kvs::cp::MessagePayload::Response(kvs::cp::Response::Set(r)) => match r.code() {
                     StatusCode::KeyNotFound => {
                         println!("Key not found");
@@ -144,10 +138,10 @@ fn main() -> std::result::Result<(), std::boxed::Box<dyn std::error::Error>> {
                 &server_addr,
                 std::time::Duration::from_secs(3),
             )?;
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(3)))?;
             let msg = kvs::cp::RequestGet::new_message(m.value_of("KEY").unwrap().to_owned());
             send_request(&msg, &mut stream)?;
-            let resp = recv_response(&mut stream)?;
-            match resp.payload() {
+            match recv_payload(&mut stream)? {
                 kvs::cp::MessagePayload::Response(kvs::cp::Response::Get(r)) => match r.code() {
                     StatusCode::KeyNotFound => {
                         println!("Key not found");
@@ -175,10 +169,10 @@ fn main() -> std::result::Result<(), std::boxed::Box<dyn std::error::Error>> {
                 &server_addr,
                 std::time::Duration::from_secs(3),
             )?;
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(3)))?;
             let msg = kvs::cp::RequestRemove::new_message(m.value_of("KEY").unwrap().to_owned());
             send_request(&msg, &mut stream)?;
-            let resp = recv_response(&mut stream)?;
-            match resp.payload() {
+            match recv_payload(&mut stream)? {
                 kvs::cp::MessagePayload::Response(kvs::cp::Response::Set(r)) => match r.code() {
                     StatusCode::KeyNotFound => {
                         println!("Key not found");
