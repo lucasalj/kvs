@@ -144,6 +144,16 @@ pub enum StatusCode {
     FatalError = 2,
 }
 
+impl std::fmt::Display for StatusCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StatusCode::Ok => f.write_str("Status Ok (code: 0)"),
+            StatusCode::KeyNotFound => f.write_str("Status KeyNotFound (code: 1)"),
+            StatusCode::FatalError => f.write_str("Status FatalError (code: 2)"),
+        }
+    }
+}
+
 impl Message {
     /// payload field getter
     pub fn payload(&self) -> &MessagePayload {

@@ -12,8 +12,10 @@ extern crate num_traits;
 pub use error::*;
 pub use kvsengine::*;
 pub use kvstore::*;
+pub use sledkvsengine::*;
 
 pub mod cp;
 mod error;
 mod kvsengine;
 mod kvstore;
+mod sledkvsengine;

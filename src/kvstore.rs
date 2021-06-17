@@ -16,6 +16,8 @@ use walkdir::WalkDir;
 
 use super::*;
 
+use kvsengine::KvsEngine;
+
 /// Log file names follow the pattern: `LOG_FILE_PREFIX` || date.fmt(%Y%m%d%H%M%S%f) || `LOG_FILE_SUFFIX`
 const LOG_FILE_PREFIX: &str = "db";
 const LOG_FILE_SUFFIX: &str = ".log";
@@ -82,104 +84,6 @@ struct LogFile {
 }
 
 impl KvStore {
-    /// Set the `value` of a string `key` to a string.
-    /// Return an error if the `value` is not written successfully.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use kvs::KvStore;
-    /// use kvs::Result;
-    ///
-    /// let user_data = KvStore::open("./");
-    /// assert!(user_data.is_ok());
-    /// let mut user_data = user_data.unwrap();
-    /// user_data.set("name".to_owned(), "John".to_owned());
-    /// user_data.set("age".to_owned(), "21".to_owned());
-    /// assert_eq!(user_data.get("name".to_owned()).unwrap(), Some("John".to_owned()));
-    ///
-    /// user_data.set("age".to_owned(), "22".to_owned());
-    /// assert_eq!(user_data.get("age".to_owned()).unwrap(), Some("22".to_owned()));
-    /// ```
-    pub fn set(&mut self, key: String, value: String) -> Result<()> {
-        let new_index = CommandIndex {
-            log_path: self.curr_log.path.clone(),
-            offset: self.curr_log.offset,
-        };
-
-        let cmd = Command::Set {
-            key: key.clone(),
-            value,
-        };
-
-        self.write_cmd_to_curr_log(cmd)?;
-
-        self.storage_index.insert(key, new_index);
-
-        if self.should_run_compaction() {
-            self.do_compaction()?;
-        }
-
-        if self.should_create_new_file() {
-            self.do_create_new_file()?;
-        }
-
-        Ok(())
-    }
-
-    /// Get the string value of a string `key`.
-    /// If the `key` does not exist, return `None`.
-    /// Return an error if the value is not read successfully.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use kvs::KvStore;
-    /// let mut user_data = KvStore::open("./").unwrap();
-    /// user_data.set("name".to_owned(), "John".to_owned());
-    /// user_data.set("age".to_owned(), "21".to_owned());
-    /// assert_eq!(user_data.get("name".to_owned()).unwrap(), Some("John".to_owned()));
-    /// ```
-    pub fn get(&mut self, key: String) -> Result<Option<String>> {
-        match self.storage_index.get(&key).map(|lci| lci.clone()) {
-            Some(lci) => Ok(Some(
-                self.read_value_from_log_at(lci.log_path.as_path(), lci.offset)?,
-            )),
-            None => Ok(None),
-        }
-    }
-
-    /// Remove a given `key`.
-    /// Return an error if the `key` does not exist or is not removed successfully.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use kvs::KvStore;
-    /// let mut user_data = KvStore::open("./").unwrap();
-    /// user_data.set("name".to_owned(), "John".to_owned());
-    /// assert_eq!(user_data.get("name".to_owned()).unwrap(), Some("John".to_owned()));
-    ///
-    /// user_data.remove("name".to_owned());
-    /// assert_eq!(user_data.get("name".to_owned()).unwrap(), None);
-    /// ```
-    pub fn remove(&mut self, key: String) -> Result<()> {
-        if let None = self.storage_index.remove(&key) {
-            Err(KvStoreError::RemoveNonExistentKey)
-        } else {
-            self.write_cmd_to_curr_log(Command::Remove { key: key.clone() })?;
-
-            if self.should_run_compaction() {
-                self.do_compaction()?;
-            }
-
-            if self.should_create_new_file() {
-                self.do_create_new_file()?;
-            }
-            Ok(())
-        }
-    }
-
     /// Open the KvStore at a given `path`.
     /// Return the KvStore.
     ///
@@ -468,5 +372,59 @@ impl KvStore {
             }
         }
         Ok((storage_index, total_cmds_counter, log_files_data))
+    }
+}
+
+impl KvsEngine for KvStore {
+    fn set(&mut self, key: String, value: String) -> Result<()> {
+        let new_index = CommandIndex {
+            log_path: self.curr_log.path.clone(),
+            offset: self.curr_log.offset,
+        };
+
+        let cmd = Command::Set {
+            key: key.clone(),
+            value,
+        };
+
+        self.write_cmd_to_curr_log(cmd)?;
+
+        self.storage_index.insert(key, new_index);
+
+        if self.should_run_compaction() {
+            self.do_compaction()?;
+        }
+
+        if self.should_create_new_file() {
+            self.do_create_new_file()?;
+        }
+
+        Ok(())
+    }
+
+    fn get(&mut self, key: String) -> Result<Option<String>> {
+        match self.storage_index.get(&key).map(|lci| lci.clone()) {
+            Some(lci) => Ok(Some(
+                self.read_value_from_log_at(lci.log_path.as_path(), lci.offset)?,
+            )),
+            None => Ok(None),
+        }
+    }
+
+    fn remove(&mut self, key: String) -> Result<()> {
+        if let None = self.storage_index.remove(&key) {
+            Err(KvStoreError::RemoveNonExistentKey)
+        } else {
+            self.write_cmd_to_curr_log(Command::Remove { key: key.clone() })?;
+
+            if self.should_run_compaction() {
+                self.do_compaction()?;
+            }
+
+            if self.should_create_new_file() {
+                self.do_create_new_file()?;
+            }
+            Ok(())
+        }
     }
 }

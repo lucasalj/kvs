@@ -1,4 +1,7 @@
 /target
 Cargo.lock
 /.vscode
-db.log
+db*.log
+db
+conf
+.kvs-server-conf.json

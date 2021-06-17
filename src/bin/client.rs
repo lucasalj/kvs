@@ -145,14 +145,12 @@ fn main() -> std::result::Result<(), std::boxed::Box<dyn std::error::Error>> {
                 kvs::cp::MessagePayload::Response(kvs::cp::Response::Get(r)) => match r.code() {
                     StatusCode::KeyNotFound => {
                         println!("Key not found");
-                        std::process::exit(1);
                     }
                     StatusCode::FatalError => std::process::exit(1),
                     StatusCode::Ok => match r.value() {
                         Some(s) => println!("{}", s),
                         None => {
                             println!("Key not found");
-                            std::process::exit(1);
                         }
                     },
                 },
@@ -173,9 +171,9 @@ fn main() -> std::result::Result<(), std::boxed::Box<dyn std::error::Error>> {
             let msg = kvs::cp::RequestRemove::new_message(m.value_of("KEY").unwrap().to_owned());
             send_request(&msg, &mut stream)?;
             match recv_payload(&mut stream)? {
-                kvs::cp::MessagePayload::Response(kvs::cp::Response::Set(r)) => match r.code() {
+                kvs::cp::MessagePayload::Response(kvs::cp::Response::Remove(r)) => match r.code() {
                     StatusCode::KeyNotFound => {
-                        println!("Key not found");
+                        eprintln!("Key not found");
                         std::process::exit(1);
                     }
                     StatusCode::FatalError => std::process::exit(1),
