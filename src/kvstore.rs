@@ -26,11 +26,11 @@ const LOG_FILE_SUFFIX: &str = ".log";
 /// written to log files before triggering the compaction algorithm. The constant `CMDS_THRESHOLD` is used as a lower bound
 /// on the total number of commands that must have been written to log files before trigerring compaction.
 const CMD_KEY_FACTOR: f64 = 1.5;
-const CMDS_THRESHOLD: u64 = 1000;
+const CMDS_THRESHOLD: u64 = 2000;
 
 /// The constant `CURR_FILE_OFFSET_THRESHOLD` is used as a lower bound for the file write offset
 /// to trigger the creation of a new file.
-const CURR_FILE_OFFSET_THRESHOLD: u64 = 8192;
+const CURR_FILE_OFFSET_THRESHOLD: u64 = 1073741824;
 
 /// Data structure that implements a persistent key-value store
 #[derive(Debug)]
@@ -163,6 +163,7 @@ impl KvStore {
     /// Check if it should create a new log file
     fn should_create_new_file(&self) -> bool {
         self.curr_log.offset > CURR_FILE_OFFSET_THRESHOLD
+            || self.curr_log.cmd_counter > (CMDS_THRESHOLD / 2)
     }
 
     /// Create a new log following the format for log file name and save the current log file information
@@ -172,17 +173,18 @@ impl KvStore {
             path: self.curr_log.path.clone(),
             cmd_counter: self.curr_log.cmd_counter,
         });
+        let new_file_path = Rc::new(self.log_dir_path.join(format!(
+            "{}{}{}",
+            LOG_FILE_PREFIX,
+            Utc::now().format("%Y%m%d%H%M%S%f"),
+            LOG_FILE_SUFFIX
+        )));
         self.curr_log = LogFile {
-            path: Rc::new(self.log_dir_path.join(format!(
-                "{}{}{}",
-                LOG_FILE_PREFIX,
-                Utc::now().format("%Y%m%d%H%M%S%f"),
-                LOG_FILE_SUFFIX
-            ))),
+            path: new_file_path.clone(),
             file: OpenOptions::new()
                 .append(true)
                 .create(true)
-                .open(self.curr_log.path.as_path())?,
+                .open(new_file_path.as_path())?,
             cmd_counter: 0,
             offset: 0,
         };
@@ -277,7 +279,8 @@ impl KvStore {
     /// Serializes the command using bincode crate and write it down to the current log
     fn write_cmd_to_curr_log(&mut self, cmd: Command) -> Result<()> {
         let cmd_serialized = bincode::serialize(&cmd)?;
-        self.curr_log.file.write_all(&*cmd_serialized)?;
+        let mut writer = std::io::BufWriter::new(&mut self.curr_log.file);
+        writer.write_all(&*cmd_serialized)?;
         self.total_cmd_counter += 1;
         self.curr_log.cmd_counter += 1;
         self.curr_log.offset += cmd_serialized.len() as u64;
