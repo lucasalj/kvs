@@ -4,29 +4,29 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{BufReader, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    rc::Rc,
     result,
 };
 
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 
-use chrono::Utc;
 use walkdir::WalkDir;
 
 use super::*;
 
 use kvsengine::KvsEngine;
 
-/// Log file names follow the pattern: `LOG_FILE_PREFIX` || date.fmt(%Y%m%d%H%M%S%f) || `LOG_FILE_SUFFIX`
+/// Log file names follow the pattern: `LOG_FILE_PREFIX` || id || `LOG_FILE_SUFFIX`
 const LOG_FILE_PREFIX: &str = "db";
 const LOG_FILE_SUFFIX: &str = ".log";
 
 /// The KvStore uses the constant `CMD_KEY_FACTOR` as a threshold to indicate the maximum proportion of commands
-/// written to log files before triggering the compaction algorithm. The constant `CMDS_THRESHOLD` is used as a lower bound
-/// on the total number of commands that must have been written to log files before trigerring compaction.
+/// written to log files before triggering the compaction algorithm.
 const CMD_KEY_FACTOR: f64 = 1.5;
-const CMDS_THRESHOLD: u64 = 2000;
+/// The constant `CMDS_THRESHOLD` is used as a lower bound on the total number of commands
+/// that must have been written to log files before trigerring compaction. Also, `CMDS_THRESHOLD/2` is also used
+/// to trigger the creation of a new file.
+const CMDS_THRESHOLD: u64 = 10000;
 
 /// The constant `CURR_FILE_OFFSET_THRESHOLD` is used as a lower bound for the file write offset
 /// to trigger the creation of a new file.
@@ -55,14 +55,14 @@ enum Command {
 /// The location of the command in a log file
 #[derive(Debug, Clone)]
 struct CommandIndex {
-    log_path: Rc<PathBuf>,
+    log_id: u64,
     offset: u64,
 }
 
 /// Information about a log file to be used by the compaction algorithm
 #[derive(Debug)]
 struct LogCompactionInfo {
-    log_path: Rc<PathBuf>,
+    log_id: u64,
     keys: Vec<String>,
     cmd_counter: u64,
 }
@@ -70,14 +70,14 @@ struct LogCompactionInfo {
 /// General information about the old log files
 #[derive(Debug)]
 struct OldLogInfo {
-    path: Rc<PathBuf>,
+    id: u64,
     cmd_counter: u64,
 }
 
 /// Information about the current log file
 #[derive(Debug)]
 struct LogFile {
-    path: Rc<PathBuf>,
+    id: u64,
     file: File,
     cmd_counter: u64,
     offset: u64,
@@ -100,14 +100,18 @@ impl KvStore {
         let path = (path.into() as PathBuf).canonicalize()?.join("");
 
         let (data_index, total_cmd_counter, mut old_log_files_data) =
-            KvStore::build_index(path.clone())?;
+            KvStore::build_index(path.as_path())?;
 
         if let Some(OldLogInfo {
-            path: curr_log_file_path,
+            id: curr_log_file_id,
             cmd_counter: curr_log_cmd_counter,
         }) = old_log_files_data.pop()
         {
             // There already exists a file, just open the last (current) one
+            let curr_log_file_path = path.join(format!(
+                "{}{}{}",
+                LOG_FILE_PREFIX, curr_log_file_id, LOG_FILE_SUFFIX
+            ));
             let mut curr_log_file = OpenOptions::new()
                 .append(true)
                 .create(false)
@@ -115,10 +119,10 @@ impl KvStore {
             let curr_log_offset = curr_log_file.seek(SeekFrom::End(0))?;
             Ok(KvStore {
                 storage_index: data_index,
-                log_dir_path: path.clone(),
+                log_dir_path: path,
                 old_logs: old_log_files_data,
                 curr_log: LogFile {
-                    path: curr_log_file_path,
+                    id: curr_log_file_id,
                     file: curr_log_file,
                     cmd_counter: curr_log_cmd_counter,
                     offset: curr_log_offset,
@@ -127,20 +131,15 @@ impl KvStore {
             })
         } else {
             // Create new log file, because there is none
-            let log_dir_path = path.clone();
-            let curr_log_file_path = Rc::new(log_dir_path.join(format!(
-                "{}{}{}",
-                LOG_FILE_PREFIX,
-                Utc::now().format("%Y%m%d%H%M%S%f"),
-                LOG_FILE_SUFFIX
-            )));
+            let curr_log_file_path =
+                path.join(format!("{}{}{}", LOG_FILE_PREFIX, 0, LOG_FILE_SUFFIX));
 
             Ok(KvStore {
                 storage_index: data_index,
-                log_dir_path: path.into(),
+                log_dir_path: path,
                 old_logs: old_log_files_data,
                 curr_log: LogFile {
-                    path: curr_log_file_path.clone(),
+                    id: 0,
                     file: OpenOptions::new()
                         .append(true)
                         .create(true)
@@ -170,17 +169,16 @@ impl KvStore {
     /// in memory.
     fn do_create_new_file(&mut self) -> Result<()> {
         self.old_logs.push(OldLogInfo {
-            path: self.curr_log.path.clone(),
+            id: self.curr_log.id,
             cmd_counter: self.curr_log.cmd_counter,
         });
-        let new_file_path = Rc::new(self.log_dir_path.join(format!(
+        let new_file_id = self.curr_log.id + 1;
+        let new_file_path = self.log_dir_path.join(format!(
             "{}{}{}",
-            LOG_FILE_PREFIX,
-            Utc::now().format("%Y%m%d%H%M%S%f"),
-            LOG_FILE_SUFFIX
-        )));
+            LOG_FILE_PREFIX, new_file_id, LOG_FILE_SUFFIX
+        ));
         self.curr_log = LogFile {
-            path: new_file_path.clone(),
+            id: new_file_id,
             file: OpenOptions::new()
                 .append(true)
                 .create(true)
@@ -199,22 +197,22 @@ impl KvStore {
     ///     4. For each file read all of its active keys, write them down to the current log and after that delete the file and
     ///        its information stored in memory.
     fn do_compaction(&mut self) -> Result<()> {
-        let keys_by_file = self
+        let keys_by_file_id = self
             .storage_index
             .iter()
-            .sorted_by(|(_, i1), (_, i2)| Ord::cmp(i1.log_path.as_path(), i2.log_path.as_path()))
-            .group_by(|(_, i1)| i1.log_path.as_path())
+            .sorted_by(|(_, i1), (_, i2)| Ord::cmp(&i1.log_id, &i2.log_id))
+            .group_by(|(_, i1)| i1.log_id)
             .into_iter()
             .map(|(p, i)| (p, i.map(|(k, _)| k.as_str()).collect_vec()))
-            .collect::<HashMap<&Path, Vec<&str>>>();
+            .collect::<HashMap<u64, Vec<&str>>>();
 
         let mut files_compaction_info = self
             .old_logs
             .iter()
             .map(|log_file_data| LogCompactionInfo {
-                log_path: log_file_data.path.clone(),
-                keys: keys_by_file
-                    .get(log_file_data.path.as_path())
+                log_id: log_file_data.id,
+                keys: keys_by_file_id
+                    .get(&log_file_data.id)
                     .unwrap_or(&vec![])
                     .iter()
                     .map(|s| String::from(*s))
@@ -236,18 +234,22 @@ impl KvStore {
         });
 
         for fk in files_compaction_info {
+            let log_path = self.log_dir_path.join(format!(
+                "{}{}{}",
+                LOG_FILE_PREFIX, fk.log_id, LOG_FILE_SUFFIX
+            ));
             {
                 let mut rdr = BufReader::new(
                     OpenOptions::new()
                         .read(true)
                         .create(false)
-                        .open(fk.log_path.as_path())?,
+                        .open(log_path.as_path())?,
                 );
                 for k in fk.keys.iter() {
                     rdr.seek(SeekFrom::Start(self.storage_index.get(k).unwrap().offset))?;
                     let cmd = bincode::deserialize_from::<_, Command>(&mut rdr)?;
                     let new_index = CommandIndex {
-                        log_path: self.curr_log.path.clone(),
+                        log_id: self.curr_log.id,
                         offset: self.curr_log.offset,
                     };
                     self.write_cmd_to_curr_log(cmd)?;
@@ -261,12 +263,12 @@ impl KvStore {
                 self.total_cmd_counter -= fk.cmd_counter;
                 if let Ok(log_files_data_index) = self
                     .old_logs
-                    .binary_search_by(|lfd| Ord::cmp(lfd.path.as_path(), fk.log_path.as_path()))
+                    .binary_search_by(|lfd| Ord::cmp(&lfd.id, &fk.log_id))
                 {
                     self.old_logs.remove(log_files_data_index);
                 }
             }
-            fs::remove_file(fk.log_path.as_path())?;
+            fs::remove_file(log_path.as_path())?;
 
             if !self.should_run_compaction() {
                 break;
@@ -331,8 +333,16 @@ impl KvStore {
         let mut log_files_data = vec![];
         for log_file_entry in log_file_entries {
             let mut log_file_cmd_counter: u64 = 0;
-            let log_file_path =
-                Rc::new(dir_path.as_ref().to_path_buf().join(log_file_entry?.path()));
+            let log_file_path = dir_path.as_ref().to_path_buf().join(log_file_entry?.path());
+            let file_name_str = log_file_path
+                .file_name()
+                .ok_or(KvStoreError::WrongFileNameFormat)?
+                .to_str()
+                .ok_or(KvStoreError::WrongFileNameFormat)?;
+            let log_id = file_name_str
+                [LOG_FILE_PREFIX.len()..(file_name_str.len() - LOG_FILE_SUFFIX.len())]
+                .parse::<u64>()
+                .map_err(|_| KvStoreError::WrongFileNameFormat)?;
             let mut log_file = OpenOptions::new()
                 .read(true)
                 .open(log_file_path.as_path())?;
@@ -345,13 +355,7 @@ impl KvStore {
                     Ok(Command::Set { key, value: _ }) => {
                         total_cmds_counter += 1;
                         log_file_cmd_counter += 1;
-                        storage_index.insert(
-                            key,
-                            CommandIndex {
-                                log_path: log_file_path.clone(),
-                                offset,
-                            },
-                        );
+                        storage_index.insert(key, CommandIndex { log_id, offset });
                     }
                     Ok(Command::Remove { key }) => {
                         total_cmds_counter += 1;
@@ -362,7 +366,7 @@ impl KvStore {
                         bincode::ErrorKind::Io(ref bincode_io_err) => match bincode_io_err.kind() {
                             std::io::ErrorKind::UnexpectedEof => {
                                 log_files_data.push(OldLogInfo {
-                                    path: log_file_path,
+                                    id: log_id,
                                     cmd_counter: log_file_cmd_counter,
                                 });
                                 break;
@@ -381,7 +385,7 @@ impl KvStore {
 impl KvsEngine for KvStore {
     fn set(&mut self, key: String, value: String) -> Result<()> {
         let new_index = CommandIndex {
-            log_path: self.curr_log.path.clone(),
+            log_id: self.curr_log.id,
             offset: self.curr_log.offset,
         };
 
@@ -406,10 +410,16 @@ impl KvsEngine for KvStore {
     }
 
     fn get(&mut self, key: String) -> Result<Option<String>> {
-        match self.storage_index.get(&key).map(|lci| lci.clone()) {
-            Some(lci) => Ok(Some(
-                self.read_value_from_log_at(lci.log_path.as_path(), lci.offset)?,
-            )),
+        match self.storage_index.get(&key).map(|lci| {
+            (
+                self.log_dir_path.join(format!(
+                    "{}{}{}",
+                    LOG_FILE_PREFIX, lci.log_id, LOG_FILE_SUFFIX
+                )),
+                lci.offset,
+            )
+        }) {
+            Some((log_path, offset)) => Ok(Some(self.read_value_from_log_at(log_path, offset)?)),
             None => Ok(None),
         }
     }
@@ -418,7 +428,7 @@ impl KvsEngine for KvStore {
         if let None = self.storage_index.remove(&key) {
             Err(KvStoreError::RemoveNonExistentKey)
         } else {
-            self.write_cmd_to_curr_log(Command::Remove { key: key.clone() })?;
+            self.write_cmd_to_curr_log(Command::Remove { key })?;
 
             if self.should_run_compaction() {
                 self.do_compaction()?;

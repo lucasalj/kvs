@@ -21,6 +21,9 @@ pub enum KvStoreError {
     /// An error that came from the sled crate
     #[fail(display = "Sled error: {}.", _0)]
     Sled(#[cause] sled::Error),
+    /// An error returned when some of the files has unknown characters in name
+    #[fail(display = "Wrong file name format.")]
+    WrongFileNameFormat,
 }
 
 impl From<bincode::Error> for KvStoreError {
