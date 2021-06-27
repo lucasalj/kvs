@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use kvs::{
     cp::{de, ser, Header, MessagePayload, StatusCode, HEADER_SIZE},
+    thread_pool::*,
     KvsEngine,
 };
 use slog::{Drain, Logger};
@@ -31,7 +32,7 @@ macro_rules! skip_err {
             Ok(val) => val,
             Err(e) => {
                 error!($logger, "Could not {}", $desc; "error" => e.to_string());
-                continue;
+                return;
             }
         }
     };
@@ -91,87 +92,96 @@ fn recv_payload(stream: &mut TcpStream) -> Result<MessagePayload, kvs::cp::error
 }
 
 fn handle_connections<Engine: KvsEngine>(
-    dbengine: &mut Engine,
+    dbengine: Engine,
     server_addr: &String,
-    log_server: &mut Logger,
+    log_server: &Logger,
 ) -> Result<(), i32> {
     let listener = unwrap_or_exit_err!(
         std::net::TcpListener::bind(server_addr),
         log_server,
         format!("open listener on address {}", server_addr)
     );
+    let thread_pool: NaiveThreadPool = unwrap_or_exit_err!(
+        NaiveThreadPool::new(4),
+        log_server,
+        "instantiate a thread pool"
+    );
     for stream in listener.incoming() {
-        let mut stream = skip_err!(stream, log_server, "open connection");
-        skip_err!(
-            stream.set_read_timeout(Some(std::time::Duration::from_secs(3))),
-            log_server,
-            "set read timeout configuration for connection"
-        );
-        let peer_addr = skip_err!(
-            stream.peer_addr(),
-            log_server,
-            "get the peer address from connection"
-        );
-        info!(log_server, "acceppted connection"; "peer" => peer_addr);
-        let _log_conn_closed_guard = LogConnectionClosedGuard {
-            peer_addr,
-            log_server: log_server.clone(),
-        };
-        match skip_err!(
-            recv_payload(&mut stream),
-            log_server,
-            "get the message payload from peer's message"
-        ) {
-            kvs::cp::MessagePayload::Request(kvs::cp::Request::Set(req)) => {
-                info!(log_server, "received message"; "peer" => peer_addr, "payload_type" => "RequestSet", "key" => req.key(), "value" => req.value());
-                let res = dbengine.set(req.key().to_owned(), req.value().to_owned());
-                let resp = kvs::cp::ResponseSet::new_message(StatusCode::from(&res));
-                skip_err!(
-                    send_response(&resp, &mut stream),
-                    log_server,
-                    "send response to peer"
-                );
-                info!(log_server, "sent message"; "peer" => peer_addr, "payload_type" => "ResponseSet", "status" => StatusCode::from(&res).to_string());
+        let db = dbengine.clone();
+        let log_server = log_server.clone();
+        thread_pool.spawn(move || {
+            let mut stream = skip_err!(stream, log_server, "open connection");
+            skip_err!(
+                stream.set_read_timeout(Some(std::time::Duration::from_secs(3))),
+                log_server,
+                "set read timeout configuration for connection"
+            );
+            let peer_addr = skip_err!(
+                stream.peer_addr(),
+                log_server,
+                "get the peer address from connection"
+            );
+            info!(log_server, "acceppted connection"; "peer" => peer_addr);
+            let _log_conn_closed_guard = LogConnectionClosedGuard {
+                peer_addr,
+                log_server: log_server.clone(),
+            };
+            match skip_err!(
+                recv_payload(&mut stream),
+                log_server,
+                "get the message payload from peer's message"
+            ) {
+                kvs::cp::MessagePayload::Request(kvs::cp::Request::Set(req)) => {
+                    info!(log_server, "received message"; "peer" => peer_addr, "payload_type" => "RequestSet", "key" => req.key(), "value" => req.value());
+                    let res = db.set(req.key().to_owned(), req.value().to_owned());
+                    let resp = kvs::cp::ResponseSet::new_message(StatusCode::from(&res));
+                    skip_err!(
+                        send_response(&resp, &mut stream),
+                        log_server,
+                        "send response to peer"
+                    );
+                    info!(log_server, "sent message"; "peer" => peer_addr, "payload_type" => "ResponseSet", "status" => StatusCode::from(&res).to_string());
+                }
+                kvs::cp::MessagePayload::Request(kvs::cp::Request::Get(req)) => {
+                    info!(log_server, "received message"; "peer" => peer_addr, "payload_type" => "RequestGet", "key" => req.key());
+                    let res = db.get(req.key().to_owned());
+                    let value = res.as_ref().unwrap_or(&None).clone();
+                    let resp = kvs::cp::ResponseGet::new_message(StatusCode::from(&res), value.clone());
+                    skip_err!(
+                        send_response(&resp, &mut stream),
+                        log_server,
+                        "send response to peer"
+                    );
+                    info!(log_server, "sent message"; "peer" => peer_addr, "payload_type" => "ResponseGet", "status" => StatusCode::from(&res).to_string(), "value" => value);
+                }
+                kvs::cp::MessagePayload::Request(kvs::cp::Request::Remove(req)) => {
+                    info!(log_server, "received message"; "peer" => peer_addr, "payload_type" => "RequestRemove", "key" => req.key());
+                    let res = db.remove(req.key().to_owned());
+                    let resp = kvs::cp::ResponseRemove::new_message(StatusCode::from(&res));
+                    skip_err!(
+                        send_response(&resp, &mut stream),
+                        log_server,
+                        "send response to peer"
+                    );
+                    info!(log_server, "sent message"; "peer" => peer_addr, "payload_type" => "ResponseRemove", "status" => StatusCode::from(&res).to_string());
+                }
+                kvs::cp::MessagePayload::Response(_) => {
+                    // Error: client sent a response message
+                    error!(log_server, "received message"; "peer" => peer_addr, "payload_type" => "Response");
+                    let resp = kvs::cp::ResponseSet::new_message(StatusCode::FatalError);
+                    skip_err!(
+                        send_response(&resp, &mut stream),
+                        log_server,
+                        "send response to peer"
+                    );
+                }
             }
-            kvs::cp::MessagePayload::Request(kvs::cp::Request::Get(req)) => {
-                info!(log_server, "received message"; "peer" => peer_addr, "payload_type" => "RequestGet", "key" => req.key());
-                let res = dbengine.get(req.key().to_owned());
-                let value = res.as_ref().unwrap_or(&None).clone();
-                let resp = kvs::cp::ResponseGet::new_message(StatusCode::from(&res), value.clone());
-                skip_err!(
-                    send_response(&resp, &mut stream),
-                    log_server,
-                    "send response to peer"
-                );
-                info!(log_server, "sent message"; "peer" => peer_addr, "payload_type" => "ResponseGet", "status" => StatusCode::from(&res).to_string(), "value" => value);
-            }
-            kvs::cp::MessagePayload::Request(kvs::cp::Request::Remove(req)) => {
-                info!(log_server, "received message"; "peer" => peer_addr, "payload_type" => "RequestRemove", "key" => req.key());
-                let res = dbengine.remove(req.key().to_owned());
-                let resp = kvs::cp::ResponseRemove::new_message(StatusCode::from(&res));
-                skip_err!(
-                    send_response(&resp, &mut stream),
-                    log_server,
-                    "send response to peer"
-                );
-                info!(log_server, "sent message"; "peer" => peer_addr, "payload_type" => "ResponseRemove", "status" => StatusCode::from(&res).to_string());
-            }
-            kvs::cp::MessagePayload::Response(_) => {
-                // Error: client sent a response message
-                error!(log_server, "received message"; "peer" => peer_addr, "payload_type" => "Response");
-                let resp = kvs::cp::ResponseSet::new_message(StatusCode::FatalError);
-                skip_err!(
-                    send_response(&resp, &mut stream),
-                    log_server,
-                    "send response to peer"
-                );
-            }
-        }
+        });
     }
     Ok(())
 }
 
-fn check_engine(engine: &String, log_server: &mut Logger) -> Result<(), i32> {
+fn check_engine(engine: &String, log_server: &Logger) -> Result<(), i32> {
     {
         let config_file_reader = std::fs::File::open(DEFAULT_CONF_FILE_PATH)
         .map(|f| std::io::BufReader::new(f))
@@ -236,22 +246,22 @@ fn run_server(engine: String, server_addr: String) -> Result<(), i32> {
     let drain = slog_async::Async::new(drain).build().fuse();
 
     let log = slog::Logger::root(drain, o!("version" => crate_version!()));
-    let mut log_server = log.new(o!("address" => server_addr.clone(), "engine" => engine.clone()));
+    let log_server = log.new(o!("address" => server_addr.clone(), "engine" => engine.clone()));
     info!(log_server, "starting");
 
-    check_engine(&engine, &mut log_server)?;
+    check_engine(&engine, &log_server)?;
 
     if engine == "kvs" {
-        let mut dbengine =
+        let dbengine =
             unwrap_or_exit_err!(kvs::KvStore::open("./"), log_server, "open database file");
-        handle_connections(&mut dbengine, &server_addr, &mut log_server)
+        handle_connections(dbengine, &server_addr, &log_server)
     } else {
-        let mut dbengine = unwrap_or_exit_err!(
+        let dbengine = unwrap_or_exit_err!(
             kvs::SledKvsEngine::open("./"),
             log_server,
             "open database file"
         );
-        handle_connections(&mut dbengine, &server_addr, &mut log_server)
+        handle_connections(dbengine, &server_addr, &log_server)
     }
 }
 

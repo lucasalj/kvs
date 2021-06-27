@@ -1,7 +1,7 @@
 use super::Result;
 
 /// Models a key-value database engine with a very simplified interface
-pub trait KvsEngine {
+pub trait KvsEngine: Clone + Send + 'static {
     /// Set the `value` of a string `key` to a string.
     /// Return an error if the `value` is not written successfully.
     ///
@@ -21,7 +21,7 @@ pub trait KvsEngine {
     /// user_data.set("age".to_owned(), "22".to_owned());
     /// assert_eq!(user_data.get("age".to_owned()).unwrap(), Some("22".to_owned()));
     /// ```
-    fn set(&mut self, key: String, value: String) -> Result<()>;
+    fn set(&self, key: String, value: String) -> Result<()>;
 
     /// Get the string value of a string `key`.
     /// If the `key` does not exist, return `None`.
@@ -36,7 +36,7 @@ pub trait KvsEngine {
     /// user_data.set("age".to_owned(), "21".to_owned());
     /// assert_eq!(user_data.get("name".to_owned()).unwrap(), Some("John".to_owned()));
     /// ```
-    fn get(&mut self, key: String) -> Result<Option<String>>;
+    fn get(&self, key: String) -> Result<Option<String>>;
 
     /// Remove a given `key`.
     /// Return an error if the `key` does not exist or is not removed successfully.
@@ -52,5 +52,5 @@ pub trait KvsEngine {
     /// user_data.remove("name".to_owned());
     /// assert_eq!(user_data.get("name".to_owned()).unwrap(), None);
     /// ```
-    fn remove(&mut self, key: String) -> Result<()>;
+    fn remove(&self, key: String) -> Result<()>;
 }

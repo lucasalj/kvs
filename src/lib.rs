@@ -19,3 +19,4 @@ mod error;
 mod kvsengine;
 mod kvstore;
 mod sledkvsengine;
+pub mod thread_pool;

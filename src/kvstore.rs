@@ -5,6 +5,7 @@ use std::{
     io::{BufReader, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     result,
+    sync::{Arc, Mutex},
 };
 
 use itertools::Itertools;
@@ -33,8 +34,13 @@ const CMDS_THRESHOLD: u64 = 10000;
 const CURR_FILE_OFFSET_THRESHOLD: u64 = 1073741824;
 
 /// Data structure that implements a persistent key-value store
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct KvStore {
+    db: Arc<Mutex<Box<KvStoreDb>>>,
+}
+
+#[derive(Debug)]
+struct KvStoreDb {
     storage_index: HashMap<String, CommandIndex>,
     log_dir_path: PathBuf,
     old_logs: Vec<OldLogInfo>,
@@ -83,7 +89,7 @@ struct LogFile {
     offset: u64,
 }
 
-impl KvStore {
+impl KvStoreDb {
     /// Open the KvStore at a given `path`.
     /// Return the KvStore.
     ///
@@ -100,7 +106,7 @@ impl KvStore {
         let path = (path.into() as PathBuf).canonicalize()?.join("");
 
         let (data_index, total_cmd_counter, mut old_log_files_data) =
-            KvStore::build_index(path.as_path())?;
+            KvStoreDb::build_index(path.as_path())?;
 
         if let Some(OldLogInfo {
             id: curr_log_file_id,
@@ -117,7 +123,8 @@ impl KvStore {
                 .create(false)
                 .open(curr_log_file_path.as_path())?;
             let curr_log_offset = curr_log_file.seek(SeekFrom::End(0))?;
-            Ok(KvStore {
+
+            Ok(KvStoreDb {
                 storage_index: data_index,
                 log_dir_path: path,
                 old_logs: old_log_files_data,
@@ -134,7 +141,7 @@ impl KvStore {
             let curr_log_file_path =
                 path.join(format!("{}{}{}", LOG_FILE_PREFIX, 0, LOG_FILE_SUFFIX));
 
-            Ok(KvStore {
+            Ok(KvStoreDb {
                 storage_index: data_index,
                 log_dir_path: path,
                 old_logs: old_log_files_data,
@@ -380,9 +387,7 @@ impl KvStore {
         }
         Ok((storage_index, total_cmds_counter, log_files_data))
     }
-}
 
-impl KvsEngine for KvStore {
     fn set(&mut self, key: String, value: String) -> Result<()> {
         let new_index = CommandIndex {
             log_id: self.curr_log.id,
@@ -439,5 +444,39 @@ impl KvsEngine for KvStore {
             }
             Ok(())
         }
+    }
+}
+
+impl KvStore {
+    /// Open the KvStore at a given `path`.
+    /// Return the KvStore.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use kvs::KvStore;
+    /// let dictionary = KvStore::open("./").unwrap();
+    /// ```
+    pub fn open<P>(path: P) -> Result<Self>
+    where
+        P: Into<PathBuf>,
+    {
+        Ok(KvStore {
+            db: Arc::new(Mutex::new(Box::new(KvStoreDb::open(path)?))),
+        })
+    }
+}
+
+impl KvsEngine for KvStore {
+    fn set(&self, key: String, value: String) -> Result<()> {
+        self.db.lock().unwrap().set(key, value)
+    }
+
+    fn get(&self, key: String) -> Result<Option<String>> {
+        self.db.lock().unwrap().get(key)
+    }
+
+    fn remove(&self, key: String) -> Result<()> {
+        self.db.lock().unwrap().remove(key)
     }
 }

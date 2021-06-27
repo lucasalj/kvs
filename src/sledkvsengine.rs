@@ -3,6 +3,7 @@ use itertools::Itertools;
 use sled::{Config, Db};
 
 /// Encaspulates the sled database engine
+#[derive(Debug, Clone)]
 pub struct SledKvsEngine {
     db: Db,
 }
@@ -27,7 +28,7 @@ impl SledKvsEngine {
 }
 
 impl KvsEngine for SledKvsEngine {
-    fn set(&mut self, key: String, value: String) -> Result<()> {
+    fn set(&self, key: String, value: String) -> Result<()> {
         self.db
             .insert(key.as_bytes(), value.as_bytes())
             .map(|_| ())
@@ -36,13 +37,13 @@ impl KvsEngine for SledKvsEngine {
         Ok(())
     }
 
-    fn get(&mut self, key: String) -> Result<Option<String>> {
+    fn get(&self, key: String) -> Result<Option<String>> {
         self.db.get(key).map_err(KvStoreError::from).map(|v| {
             v.and_then(|iv| String::from_utf8(iv.iter().map(Clone::clone).collect_vec()).ok())
         })
     }
 
-    fn remove(&mut self, key: String) -> Result<()> {
+    fn remove(&self, key: String) -> Result<()> {
         self.db
             .remove(key)
             .map_err(KvStoreError::from)
