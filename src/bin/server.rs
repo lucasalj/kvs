@@ -101,8 +101,8 @@ fn handle_connections<Engine: KvsEngine>(
         log_server,
         format!("open listener on address {}", server_addr)
     );
-    let thread_pool: NaiveThreadPool = unwrap_or_exit_err!(
-        NaiveThreadPool::new(4),
+    let thread_pool = unwrap_or_exit_err!(
+        SharedQueueThreadPool::new(num_cpus::get() as u32),
         log_server,
         "instantiate a thread pool"
     );
