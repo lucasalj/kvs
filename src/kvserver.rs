@@ -1,21 +1,16 @@
-use super::{
-    cp::*, kvsengine::KvsEngine, kvstore::KvStore, sledkvsengine::SledKvsEngine,
-    thread_pool::ThreadPool,
-};
-use serde::{Deserialize, Serialize};
-use slog::{Drain, Logger};
+use super::{cp::*, kvsengine::KvsEngine, thread_pool::ThreadPool};
+use slog::Logger;
 use smallvec::{smallvec, SmallVec};
 use std::io::prelude::*;
 use std::{
-    convert::TryFrom,
     error::Error,
     fmt,
     net::{SocketAddr, TcpStream},
-    path::PathBuf,
-    str::FromStr,
 };
 
-macro_rules! skip_err {
+/// Macro to unwrap the Ok of a result or if Err, log and returns the control flow to the caller
+#[macro_export]
+macro_rules! unwrap_or_return_on_err {
     ($res:expr, $logger:expr, $desc:expr) => {
         match $res {
             Ok(val) => val,
@@ -27,7 +22,9 @@ macro_rules! skip_err {
     };
 }
 
-macro_rules! unwrap_or_exit_err {
+/// Macro to unwrap the Ok of a result or if Err, log and returns the control flow with the value 1 to the caller
+#[macro_export]
+macro_rules! unwrap_or_return_code1_on_err {
     ($res:expr, $logger:expr, $desc:expr) => {
         $res.map_err(|e| {
             error!($logger, "Could not {}", $desc; "error" => e.to_string());
@@ -36,42 +33,15 @@ macro_rules! unwrap_or_exit_err {
     };
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone, Copy)]
-enum Engine {
-    Kvs,
-    Sled,
-}
-
-impl fmt::Display for Engine {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Engine::Kvs => f.write_str("kvs"),
-            Engine::Sled => f.write_str("sled"),
-        }
-    }
-}
-
-impl<'a> std::convert::TryFrom<&'a str> for Engine {
-    type Error = KvServerCreationError<'a>;
-
-    fn try_from(value: &'a str) -> Result<Self, Self::Error> {
-        Ok(match value {
-            "sled" => Engine::Sled,
-            "kvs" => Engine::Kvs,
-            _ => return Err(KvServerCreationError::EngineParseError { engine_name: value }),
-        })
-    }
-}
-
 /// The server that listens for tcp connections,
 /// receive commands, directly communicates with the database engine executing each command
 /// and send responses to kvs clients
 #[derive(Debug)]
-pub struct KvServer<Tp: ThreadPool> {
-    engine: Engine,
+pub struct KvServer<Engine: KvsEngine, Tp: ThreadPool> {
+    db: Engine,
     address: SocketAddr,
-    config_file_path: PathBuf,
     thread_pool: Tp,
+    logger: Logger,
 }
 
 /// The error type returned by the new function of the KvServer
@@ -103,11 +73,6 @@ impl Drop for LogConnectionClosedGuard {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-struct ServerConfiguration {
-    engine: Engine,
-}
-
 impl<'a> fmt::Display for KvServerCreationError<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -124,20 +89,21 @@ impl<'a> fmt::Display for KvServerCreationError<'a> {
 
 impl<'a> Error for KvServerCreationError<'a> {}
 
-impl<Tp> KvServer<Tp>
+impl<Engine, Tp> KvServer<Engine, Tp>
 where
+    Engine: KvsEngine,
     Tp: ThreadPool,
 {
     /// Creates a new KvServer object given the `engine` type name,
     /// the server `address` and the `config_file` for reading/storing server configuration.
     pub fn new<'a>(
-        engine: &'a str,
+        engine: Engine,
         address: &'a str,
-        config_file: &'a str,
         thread_pool: Tp,
+        logger: Logger,
     ) -> Result<Self, KvServerCreationError<'a>> {
         Ok(Self {
-            engine: Engine::try_from(engine)?,
+            db: engine,
             address: match address.parse::<SocketAddr>() {
                 Ok(addr) => addr,
                 Err(err) => {
@@ -147,119 +113,29 @@ where
                     })
                 }
             },
-            config_file_path: PathBuf::from_str(config_file).unwrap(),
             thread_pool,
+            logger,
         })
     }
 
     /// Starts listening for connections and enter the forever loop handling server connections
     pub fn run(&self) -> Result<(), i32> {
-        let decorator = slog_term::TermDecorator::new().stderr().build();
-        let drain = slog_term::FullFormat::new(decorator)
-            .use_file_location()
-            .use_utc_timestamp()
-            .use_original_order()
-            .build()
-            .fuse();
-        let drain = slog_async::Async::new(drain).build().fuse();
-
-        let log = slog::Logger::root(drain, o!("version" => env!("CARGO_PKG_VERSION")));
-        let log_server = log.new(o!("address" => self.address, "engine" => self.address));
-        info!(log_server, "starting");
-
-        self.check_engine(log_server.clone())?;
-
-        match self.engine {
-            Engine::Kvs => {
-                let dbengine =
-                    unwrap_or_exit_err!(KvStore::open("./"), log_server, "open database file");
-                self.handle_connections(dbengine, log_server)
-            }
-            Engine::Sled => {
-                let dbengine = unwrap_or_exit_err!(
-                    SledKvsEngine::open("./"),
-                    log_server,
-                    "open database file"
-                );
-                self.handle_connections(dbengine, log_server)
-            }
-        }
-    }
-
-    fn check_engine(&self, log_server: Logger) -> Result<(), i32> {
-        {
-            let config_file_reader = std::fs::File::open(&self.config_file_path)
-            .map_or_else(
-                |err| {
-                    if err.kind() == std::io::ErrorKind::NotFound {
-                        Ok(None)
-                    } else {
-                        error!(
-                            log_server,
-                            "Could not open configuration file for reading"; "error" => err.to_string()
-                        );
-                        return Err(1);
-                    }
-                },
-                |f| Ok(Some(std::io::BufReader::new(f))),
-            )
-            .unwrap();
-            if let Some(rdr) = config_file_reader {
-                let config: Result<ServerConfiguration, _> = serde_json::from_reader(rdr);
-                let server_conf =
-                    unwrap_or_exit_err!(config, log_server, "get the json configuration from file");
-                if server_conf.engine != self.engine {
-                    error!(
-                        log_server,
-                        "The server was running earlier with another engine"; "old_engine" => server_conf.engine.to_string()
-                    );
-                    return Err(1);
-                }
-            }
-        }
-        let config_file_writer = std::io::BufWriter::new(unwrap_or_exit_err!(
-            std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&self.config_file_path),
-            log_server,
-            "open configuration file for writting"
-        ));
-        unwrap_or_exit_err!(
-            serde_json::to_writer(
-                config_file_writer,
-                &ServerConfiguration {
-                    engine: self.engine
-                }
-            ),
-            log_server,
-            "write the json configuration to the file"
-        );
-        Ok(())
-    }
-
-    fn handle_connections<Engine: KvsEngine>(
-        &self,
-        dbengine: Engine,
-        log_server: Logger,
-    ) -> Result<(), i32> {
-        let listener = unwrap_or_exit_err!(
+        let listener = unwrap_or_return_code1_on_err!(
             std::net::TcpListener::bind(self.address),
-            log_server,
+            self.logger,
             format!("open listener on address {}", self.address)
         );
         for stream in listener.incoming() {
-            let db = dbengine.clone();
-            let log_server = log_server.clone();
+            let log_server = self.logger.clone();
+            let db = self.db.clone();
             self.thread_pool.spawn(move || {
-                let mut stream = skip_err!(stream, log_server, "open connection");
-                skip_err!(
+                let mut stream = unwrap_or_return_on_err!(stream, log_server, "open connection");
+                unwrap_or_return_on_err!(
                     stream.set_read_timeout(Some(std::time::Duration::from_secs(3))),
                     log_server,
                     "set read timeout configuration for connection"
                 );
-                let peer_addr = skip_err!(
+                let peer_addr = unwrap_or_return_on_err!(
                     stream.peer_addr(),
                     log_server,
                     "get the peer address from connection"
@@ -269,8 +145,8 @@ where
                     peer_addr,
                     log_server: log_server.clone(),
                 };
-                match skip_err!(
-                    KvServer::<Tp>::recv_payload(&mut stream),
+                match unwrap_or_return_on_err!(
+                    KvServer::<Engine, Tp>::recv_payload(&mut stream),
                     log_server,
                     "get the message payload from peer's message"
                 ) {
@@ -278,8 +154,8 @@ where
                         info!(log_server, "received message"; "peer" => peer_addr, "payload_type" => "RequestSet", "key" => req.key(), "value" => req.value());
                         let res = db.set(req.key().to_owned(), req.value().to_owned());
                         let resp = ResponseSet::new_message(StatusCode::from(&res));
-                        skip_err!(
-                            KvServer::<Tp>::send_response(&resp, &mut stream),
+                        unwrap_or_return_on_err!(
+                            KvServer::<Engine, Tp>::send_response(&resp, &mut stream),
                             log_server,
                             "send response to peer"
                         );
@@ -290,8 +166,8 @@ where
                         let res = db.get(req.key().to_owned());
                         let value = res.as_ref().unwrap_or(&None).clone();
                         let resp = ResponseGet::new_message(StatusCode::from(&res), value.clone());
-                        skip_err!(
-                            KvServer::<Tp>::send_response(&resp, &mut stream),
+                        unwrap_or_return_on_err!(
+                            KvServer::<Engine, Tp>::send_response(&resp, &mut stream),
                             log_server,
                             "send response to peer"
                         );
@@ -301,8 +177,8 @@ where
                         info!(log_server, "received message"; "peer" => peer_addr, "payload_type" => "RequestRemove", "key" => req.key());
                         let res = db.remove(req.key().to_owned());
                         let resp = ResponseRemove::new_message(StatusCode::from(&res));
-                        skip_err!(
-                            KvServer::<Tp>::send_response(&resp, &mut stream),
+                        unwrap_or_return_on_err!(
+                            KvServer::<Engine, Tp>::send_response(&resp, &mut stream),
                             log_server,
                             "send response to peer"
                         );
@@ -312,8 +188,8 @@ where
                         // Error: client sent a response message
                         error!(log_server, "received message"; "peer" => peer_addr, "payload_type" => "Response");
                         let resp = ResponseSet::new_message(StatusCode::FatalError);
-                        skip_err!(
-                            KvServer::<Tp>::send_response(&resp, &mut stream),
+                        unwrap_or_return_on_err!(
+                            KvServer::<Engine, Tp>::send_response(&resp, &mut stream),
                             log_server,
                             "send response to peer"
                         );
