@@ -1,7 +1,10 @@
 //! Thread Pool trait and implementations
 
-use super::Result;
+use std::{convert, fmt};
+
 use crossbeam::channel::*;
+use rayon::ThreadPoolBuildError;
+type Result<T> = std::result::Result<T, ThreadPoolError>;
 
 /// Thread Pool minimal API
 pub trait ThreadPool {
@@ -21,6 +24,29 @@ pub trait ThreadPool {
     fn spawn<F>(&self, job: F)
     where
         F: FnOnce() + Send + 'static;
+}
+
+/// An error type returned by the Thread Pool api
+#[derive(Debug)]
+pub enum ThreadPoolError {
+    /// An error returned by the rayon crate while building a thread pool
+    RayonThreadPoolBuildErr(rayon::ThreadPoolBuildError),
+}
+
+impl fmt::Display for ThreadPoolError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
+        match self {
+            ThreadPoolError::RayonThreadPoolBuildErr(err) => f.write_fmt(format_args!("{}", err)),
+        }
+    }
+}
+
+impl std::error::Error for ThreadPoolError {}
+
+impl convert::From<ThreadPoolBuildError> for ThreadPoolError {
+    fn from(err: ThreadPoolBuildError) -> Self {
+        ThreadPoolError::RayonThreadPoolBuildErr(err)
+    }
 }
 
 /// Naive implementation of a Thread Pool
@@ -102,19 +128,23 @@ impl ThreadPool for SharedQueueThreadPool {
 }
 
 /// A more sophisticated thread pool that uses the rayon crate
-pub struct RayonThreadPool;
+pub struct RayonThreadPool {
+    thread_pool: rayon::ThreadPool,
+}
 
 impl ThreadPool for RayonThreadPool {
     fn new(threads: u32) -> Result<Self> {
-        let _ = threads;
-        todo!()
+        Ok(Self {
+            thread_pool: rayon::ThreadPoolBuilder::new()
+                .num_threads(threads as usize)
+                .build()?,
+        })
     }
 
     fn spawn<F>(&self, job: F)
     where
         F: FnOnce() + Send + 'static,
     {
-        let _ = job;
-        todo!()
+        self.thread_pool.spawn(job)
     }
 }

@@ -1,5 +1,7 @@
 use failure::Fail;
 
+use crate::thread_pool;
+
 /// An error type for describing any kind of error returned by the KvStore API
 #[derive(Debug, Fail)]
 pub enum KvStoreError {
@@ -24,6 +26,9 @@ pub enum KvStoreError {
     /// An error returned when some of the files has unknown characters in name
     #[fail(display = "Wrong file name format.")]
     WrongFileNameFormat,
+    /// An error returned by the thread pool
+    #[fail(display = "Thread pool error: {}.", _0)]
+    ThreadPoolBuild(#[cause] crate::thread_pool::ThreadPoolError),
 }
 
 impl From<bincode::Error> for KvStoreError {
@@ -53,5 +58,11 @@ impl From<KvStoreError> for std::boxed::Box<dyn std::error::Error> {
 impl From<sled::Error> for KvStoreError {
     fn from(error: sled::Error) -> Self {
         Self::Sled(error)
+    }
+}
+
+impl From<thread_pool::ThreadPoolError> for KvStoreError {
+    fn from(err: thread_pool::ThreadPoolError) -> Self {
+        Self::ThreadPoolBuild(err)
     }
 }
