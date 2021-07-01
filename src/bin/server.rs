@@ -2,7 +2,10 @@
 extern crate clap;
 
 use clap::{App, Arg};
-use kvs::KvServer;
+use kvs::{
+    thread_pool::{SharedQueueThreadPool, ThreadPool},
+    KvServer,
+};
 use std::net::SocketAddr;
 
 const DEFAULT_SERVER_IP_PORT: &'static str = "127.0.0.1:4000";
@@ -43,6 +46,10 @@ fn main() {
         engine.as_str(),
         server_addr.as_str(),
         DEFAULT_CONF_FILE_PATH,
+        SharedQueueThreadPool::new(num_cpus::get() as u32).unwrap_or_else(|err| {
+            eprintln!("{}", err);
+            std::process::exit(1)
+        }),
     )
     .unwrap();
     server.run().unwrap_or_else(|code| std::process::exit(code));

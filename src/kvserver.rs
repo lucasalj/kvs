@@ -1,9 +1,6 @@
 use super::{
-    cp::*,
-    kvsengine::KvsEngine,
-    kvstore::KvStore,
-    sledkvsengine::SledKvsEngine,
-    thread_pool::{SharedQueueThreadPool, ThreadPool},
+    cp::*, kvsengine::KvsEngine, kvstore::KvStore, sledkvsengine::SledKvsEngine,
+    thread_pool::ThreadPool,
 };
 use serde::{Deserialize, Serialize};
 use slog::{Drain, Logger};
@@ -70,10 +67,11 @@ impl<'a> std::convert::TryFrom<&'a str> for Engine {
 /// receive commands, directly communicates with the database engine executing each command
 /// and send responses to kvs clients
 #[derive(Debug)]
-pub struct KvServer {
+pub struct KvServer<Tp: ThreadPool> {
     engine: Engine,
     address: SocketAddr,
     config_file_path: PathBuf,
+    thread_pool: Tp,
 }
 
 /// The error type returned by the new function of the KvServer
@@ -126,13 +124,17 @@ impl<'a> fmt::Display for KvServerCreationError<'a> {
 
 impl<'a> Error for KvServerCreationError<'a> {}
 
-impl KvServer {
+impl<Tp> KvServer<Tp>
+where
+    Tp: ThreadPool,
+{
     /// Creates a new KvServer object given the `engine` type name,
     /// the server `address` and the `config_file` for reading/storing server configuration.
     pub fn new<'a>(
         engine: &'a str,
         address: &'a str,
         config_file: &'a str,
+        thread_pool: Tp,
     ) -> Result<Self, KvServerCreationError<'a>> {
         Ok(Self {
             engine: Engine::try_from(engine)?,
@@ -146,6 +148,7 @@ impl KvServer {
                 }
             },
             config_file_path: PathBuf::from_str(config_file).unwrap(),
+            thread_pool,
         })
     }
 
@@ -246,15 +249,10 @@ impl KvServer {
             log_server,
             format!("open listener on address {}", self.address)
         );
-        let thread_pool = unwrap_or_exit_err!(
-            SharedQueueThreadPool::new(num_cpus::get() as u32),
-            log_server,
-            "instantiate a thread pool"
-        );
         for stream in listener.incoming() {
             let db = dbengine.clone();
             let log_server = log_server.clone();
-            thread_pool.spawn(move || {
+            self.thread_pool.spawn(move || {
                 let mut stream = skip_err!(stream, log_server, "open connection");
                 skip_err!(
                     stream.set_read_timeout(Some(std::time::Duration::from_secs(3))),
@@ -272,7 +270,7 @@ impl KvServer {
                     log_server: log_server.clone(),
                 };
                 match skip_err!(
-                    KvServer::recv_payload(&mut stream),
+                    KvServer::<Tp>::recv_payload(&mut stream),
                     log_server,
                     "get the message payload from peer's message"
                 ) {
@@ -281,7 +279,7 @@ impl KvServer {
                         let res = db.set(req.key().to_owned(), req.value().to_owned());
                         let resp = ResponseSet::new_message(StatusCode::from(&res));
                         skip_err!(
-                            KvServer::send_response(&resp, &mut stream),
+                            KvServer::<Tp>::send_response(&resp, &mut stream),
                             log_server,
                             "send response to peer"
                         );
@@ -293,7 +291,7 @@ impl KvServer {
                         let value = res.as_ref().unwrap_or(&None).clone();
                         let resp = ResponseGet::new_message(StatusCode::from(&res), value.clone());
                         skip_err!(
-                            KvServer::send_response(&resp, &mut stream),
+                            KvServer::<Tp>::send_response(&resp, &mut stream),
                             log_server,
                             "send response to peer"
                         );
@@ -304,7 +302,7 @@ impl KvServer {
                         let res = db.remove(req.key().to_owned());
                         let resp = ResponseRemove::new_message(StatusCode::from(&res));
                         skip_err!(
-                            KvServer::send_response(&resp, &mut stream),
+                            KvServer::<Tp>::send_response(&resp, &mut stream),
                             log_server,
                             "send response to peer"
                         );
@@ -315,7 +313,7 @@ impl KvServer {
                         error!(log_server, "received message"; "peer" => peer_addr, "payload_type" => "Response");
                         let resp = ResponseSet::new_message(StatusCode::FatalError);
                         skip_err!(
-                            KvServer::send_response(&resp, &mut stream),
+                            KvServer::<Tp>::send_response(&resp, &mut stream),
                             log_server,
                             "send response to peer"
                         );
