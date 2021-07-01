@@ -7,7 +7,7 @@ use tempfile::TempDir;
 
 use kvs::*;
 
-fn write_benchmark<E: 'static + KvsEngine>(mut db: E, name: &str, c: &mut Criterion) {
+fn write_benchmark<E: 'static + KvsEngine>(db: E, name: &str, c: &mut Criterion) {
     const TIMES: usize = 100;
 
     let mut rng = thread_rng();
@@ -56,7 +56,7 @@ fn write_benchmark<E: 'static + KvsEngine>(mut db: E, name: &str, c: &mut Criter
     });
 }
 
-fn read_benchmark<E: 'static + KvsEngine>(mut db: E, name: &str, c: &mut Criterion) {
+fn read_benchmark<E: 'static + KvsEngine>(db: E, name: &str, c: &mut Criterion) {
     const TIMES: usize = 1000;
 
     let mut rng = thread_rng();
