@@ -1,3 +1,8 @@
+use super::*;
+use itertools::Itertools;
+use kvsengine::KvsEngine;
+use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fmt::Debug,
@@ -5,17 +10,9 @@ use std::{
     io::{BufReader, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     result,
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
-
-use itertools::Itertools;
-use serde::{Deserialize, Serialize};
-
 use walkdir::WalkDir;
-
-use super::*;
-
-use kvsengine::KvsEngine;
 
 /// Log file names follow the pattern: `LOG_FILE_PREFIX` || id || `LOG_FILE_SUFFIX`
 const LOG_FILE_PREFIX: &str = "db";
@@ -293,6 +290,7 @@ impl KvStoreDb {
         self.total_cmd_counter += 1;
         self.curr_log.cmd_counter += 1;
         self.curr_log.offset += cmd_serialized.len() as u64;
+        writer.flush()?;
         Ok(())
     }
 
@@ -469,14 +467,14 @@ impl KvStore {
 
 impl KvsEngine for KvStore {
     fn set(&self, key: String, value: String) -> Result<()> {
-        self.db.lock().unwrap().set(key, value)
+        self.db.lock().set(key, value)
     }
 
     fn get(&self, key: String) -> Result<Option<String>> {
-        self.db.lock().unwrap().get(key)
+        self.db.lock().get(key)
     }
 
     fn remove(&self, key: String) -> Result<()> {
-        self.db.lock().unwrap().remove(key)
+        self.db.lock().remove(key)
     }
 }
