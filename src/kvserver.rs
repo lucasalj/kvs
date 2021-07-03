@@ -2,6 +2,9 @@ use super::{cp::*, kvsengine::KvsEngine, thread_pool::ThreadPool};
 use slog::Logger;
 use smallvec::{smallvec, SmallVec};
 use std::io::prelude::*;
+use std::net::TcpListener;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::{
     error::Error,
     fmt,
@@ -42,6 +45,54 @@ pub struct KvServer<Engine: KvsEngine, Tp: ThreadPool> {
     address: SocketAddr,
     thread_pool: Tp,
     logger: Logger,
+    shutdown_trigger: KvServerShutdownTrigger,
+    listener: TcpListener,
+}
+
+/// The signal that is sent to the KvServer indicanting that it should stop running
+#[derive(Debug, Clone)]
+pub struct KvServerShutdownTrigger(Arc<AtomicBool>, SocketAddr);
+
+impl KvServerShutdownTrigger {
+    /// Creates a new Shutdown signal
+    pub fn new(server_addresss: SocketAddr) -> Self {
+        Self(Arc::new(AtomicBool::new(false)), server_addresss)
+    }
+
+    /// Fires a signal to the server indicating that it must shutdown
+    pub fn trigger(&self) -> Result<(), KvServerShutdownTriggerError> {
+        self.0.store(true, Ordering::SeqCst);
+        TcpStream::connect(&self.1)?;
+        Ok(())
+    }
+
+    /// Tells if the signal was fired
+    pub fn must_shutdown(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+/// An error returned when KvServerShutdownTrigger fails in the process of signaling
+#[derive(Debug)]
+pub enum KvServerShutdownTriggerError {
+    /// Fails to connect to server to force a atomic read from the server
+    TCPConnection(std::io::Error),
+}
+
+impl fmt::Display for KvServerShutdownTriggerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            KvServerShutdownTriggerError::TCPConnection(e) => f.write_str(e.to_string().as_str()),
+        }
+    }
+}
+
+impl std::error::Error for KvServerShutdownTriggerError {}
+
+impl std::convert::From<std::io::Error> for KvServerShutdownTriggerError {
+    fn from(e: std::io::Error) -> Self {
+        KvServerShutdownTriggerError::TCPConnection(e)
+    }
 }
 
 /// The error type returned by the new function of the KvServer
@@ -60,6 +111,9 @@ pub enum KvServerCreationError<'a> {
         /// Internal cause
         cause: String,
     },
+
+    /// The listener failed to start
+    UnableToStartListener,
 }
 
 struct LogConnectionClosedGuard {
@@ -83,6 +137,7 @@ impl<'a> fmt::Display for KvServerCreationError<'a> {
             KvServerCreationError::InvalidSocketAddress { addr, cause } => f.write_fmt(
                 format_args!("Invalid socket address: {}. Error: {}", addr, cause),
             ),
+            KvServerCreationError::UnableToStartListener => f.write_str("Could not start listener"),
         }
     }
 }
@@ -102,39 +157,40 @@ where
         thread_pool: Tp,
         logger: Logger,
     ) -> Result<Self, KvServerCreationError<'a>> {
+        let address = match address.parse::<SocketAddr>() {
+            Ok(addr) => addr,
+            Err(err) => {
+                return Err(KvServerCreationError::InvalidSocketAddress {
+                    addr: address,
+                    cause: err.to_string(),
+                })
+            }
+        };
+        let listener = std::net::TcpListener::bind(address).map_err(|e| {
+            error!(logger, "Could not open listener on address {}", address; "error" => e.to_string());
+            KvServerCreationError::UnableToStartListener
+        })?;
         Ok(Self {
             db: engine,
-            address: match address.parse::<SocketAddr>() {
-                Ok(addr) => addr,
-                Err(err) => {
-                    return Err(KvServerCreationError::InvalidSocketAddress {
-                        addr: address,
-                        cause: err.to_string(),
-                    })
-                }
-            },
+            address,
             thread_pool,
             logger,
+            shutdown_trigger: KvServerShutdownTrigger::new(address),
+            listener,
         })
     }
 
     /// Starts listening for connections and enter the forever loop handling server connections
     pub fn run(&self) -> Result<(), i32> {
-        let listener = unwrap_or_return_code1_on_err!(
-            std::net::TcpListener::bind(self.address),
-            self.logger,
-            format!("open listener on address {}", self.address)
-        );
-        for stream in listener.incoming() {
+        for stream in self.listener.incoming() {
+            if self.shutdown_trigger.must_shutdown() {
+                info!(self.logger, "server stopped listening to connections");
+                break;
+            }
             let log_server = self.logger.clone();
             let db = self.db.clone();
             self.thread_pool.spawn(move || {
                 let mut stream = unwrap_or_return_on_err!(stream, log_server, "open connection");
-                unwrap_or_return_on_err!(
-                    stream.set_read_timeout(Some(std::time::Duration::from_secs(3))),
-                    log_server,
-                    "set read timeout configuration for connection"
-                );
                 let peer_addr = unwrap_or_return_on_err!(
                     stream.peer_addr(),
                     log_server,
@@ -200,17 +256,16 @@ where
         Ok(())
     }
 
+    /// Gives the user a trigger that can be used to signal to the server that it must stop running
+    pub fn get_shutdown_trigger(&self) -> KvServerShutdownTrigger {
+        self.shutdown_trigger.clone()
+    }
+
     fn send_response(msg: &Message, stream: &mut TcpStream) -> Result<(), error::Error> {
-        let mut buf = SmallVec::<[u8; 1024]>::new();
+        let mut buf = SmallVec::<[u8; 256]>::new();
         buf.resize(ser::calc_len(msg)?, 0u8);
         ser::to_bytes(msg, &mut buf[..])?;
-        let mut idx = 0usize;
-        loop {
-            idx += stream.write(&buf[idx..])?;
-            if idx == buf.len() {
-                break;
-            }
-        }
+        stream.write_all(&buf[..])?;
         Ok(())
     }
 
@@ -220,7 +275,7 @@ where
         let header: Result<Header, _> = de::from_bytes(&header_buf);
         let header = header?;
 
-        let mut payload_buf: SmallVec<[u8; 1024]> = smallvec![0; header.payload_length() as usize];
+        let mut payload_buf: SmallVec<[u8; 256]> = smallvec![0; header.payload_length() as usize];
         stream.read_exact(&mut payload_buf)?;
         de::from_bytes(&payload_buf)
     }

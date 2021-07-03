@@ -81,14 +81,15 @@ impl Drop for PanicGuard {
     fn drop(&mut self) {
         if std::thread::panicking() {
             let r = self.channel_receiver.clone();
-            let r2 = self.channel_receiver.clone();
-            std::thread::spawn(move || {
-                let _panic_guard = PanicGuard {
-                    channel_receiver: r2,
-                };
-                loop {
-                    let task = r.recv().unwrap();
-                    task();
+            std::thread::spawn(move || loop {
+                match r.recv() {
+                    Ok(task) => {
+                        let _panic_guard = PanicGuard {
+                            channel_receiver: r.clone(),
+                        };
+                        task();
+                    }
+                    _ => break,
                 }
             });
         }
@@ -103,14 +104,15 @@ impl ThreadPool for SharedQueueThreadPool {
         ) = unbounded();
         for _ in 0..threads {
             let r = receiver.clone();
-            let r2 = receiver.clone();
-            std::thread::spawn(move || {
-                let _panic_guard = PanicGuard {
-                    channel_receiver: r2,
-                };
-                loop {
-                    let task = r.recv().unwrap();
-                    task();
+            std::thread::spawn(move || loop {
+                match r.recv() {
+                    Ok(task) => {
+                        let _panic_guard = PanicGuard {
+                            channel_receiver: r.clone(),
+                        };
+                        task();
+                    }
+                    _ => break,
                 }
             });
         }

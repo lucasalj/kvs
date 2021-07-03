@@ -93,11 +93,7 @@ impl KvClient {
     /// Sends a command set, given the `key` and `value`, to the server over a tcp connection and get the ok
     /// result back if the operation completed sucessfully or the error if it failed
     pub fn send_cmd_set(&self, key: String, value: String) -> Result<(), KvClientError<'static>> {
-        let mut stream = std::net::TcpStream::connect_timeout(
-            &self.server_address,
-            std::time::Duration::from_secs(3),
-        )?;
-        stream.set_read_timeout(Some(std::time::Duration::from_secs(3)))?;
+        let mut stream = std::net::TcpStream::connect(&self.server_address)?;
         let msg = RequestSet::new_message(key, value);
         KvClient::send_request(&msg, &mut stream)?;
         match KvClient::recv_payload(&mut stream)? {
@@ -113,11 +109,7 @@ impl KvClient {
     /// Sends a command get, given the `key`, to the server over a tcp connection and get the ok result back
     /// if the operation completed sucessfully with the `key`'s `value` or the error if it failed
     pub fn send_cmd_get(&self, key: String) -> Result<Option<String>, KvClientError<'static>> {
-        let mut stream = std::net::TcpStream::connect_timeout(
-            &self.server_address,
-            std::time::Duration::from_secs(3),
-        )?;
-        stream.set_read_timeout(Some(std::time::Duration::from_secs(3)))?;
+        let mut stream = std::net::TcpStream::connect(&self.server_address)?;
         let msg = RequestGet::new_message(key);
         KvClient::send_request(&msg, &mut stream)?;
         match KvClient::recv_payload(&mut stream)? {
@@ -136,11 +128,7 @@ impl KvClient {
     /// Sends a command rm, given the `key`, to the server over a tcp connection and get the ok
     /// result back if the operation completed sucessfully or the error if it failed
     pub fn send_cmd_rm(&self, key: String) -> Result<(), KvClientError<'static>> {
-        let mut stream = std::net::TcpStream::connect_timeout(
-            &self.server_address,
-            std::time::Duration::from_secs(3),
-        )?;
-        stream.set_read_timeout(Some(std::time::Duration::from_secs(3)))?;
+        let mut stream = std::net::TcpStream::connect(&self.server_address)?;
         let msg = RequestRemove::new_message(key);
         KvClient::send_request(&msg, &mut stream)?;
         match KvClient::recv_payload(&mut stream)? {
@@ -154,16 +142,10 @@ impl KvClient {
     }
 
     fn send_request(msg: &Message, stream: &mut TcpStream) -> Result<(), error::Error> {
-        let mut buf = SmallVec::<[u8; 1024]>::new();
+        let mut buf = SmallVec::<[u8; 256]>::new();
         buf.resize(ser::calc_len(msg)?, 0u8);
         ser::to_bytes(msg, &mut buf[..])?;
-        let mut idx = 0usize;
-        loop {
-            idx += stream.write(&buf[idx..])?;
-            if idx == buf.len() {
-                break;
-            }
-        }
+        stream.write_all(&buf[..])?;
         Ok(())
     }
 
@@ -173,7 +155,7 @@ impl KvClient {
         let header: Result<Header, _> = de::from_bytes(&header_buf);
         let header = header?;
 
-        let mut payload_buf: SmallVec<[u8; 1024]> = smallvec![0; header.payload_length() as usize];
+        let mut payload_buf: SmallVec<[u8; 256]> = smallvec![0; header.payload_length() as usize];
         stream.read_exact(&mut payload_buf)?;
         de::from_bytes(&payload_buf)
     }
