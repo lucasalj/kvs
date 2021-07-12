@@ -1,15 +1,26 @@
 use super::{cp::*, kvsengine::KvsEngine, thread_pool::ThreadPool};
+use mio::{
+    net::{TcpListener, TcpStream},
+    {Events, Interest, Poll, Token},
+};
+use mio_signals::{Signal, Signals};
+use mio_timerfd::{ClockId, TimerFd};
 use slog::Logger;
 use smallvec::{smallvec, SmallVec};
-use std::io::prelude::*;
-use std::net::TcpListener;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::{
     error::Error,
     fmt,
-    net::{SocketAddr, TcpStream},
+    io::prelude::*,
+    net::SocketAddr,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
+
+const SERVER_TOKEN: Token = Token(0);
+const SERVER_TIMER_TOKEN: Token = Token(1);
+const SERVER_SIGNALS_TOKEN: Token = Token(2);
 
 /// Macro to unwrap the Ok of a result or if Err, log and returns the control flow to the caller
 #[macro_export]
@@ -46,29 +57,28 @@ pub struct KvServer<Engine: KvsEngine, Tp: ThreadPool> {
     thread_pool: Tp,
     logger: Logger,
     shutdown_trigger: KvServerShutdownTrigger,
-    listener: TcpListener,
+    signals: Option<Signals>,
 }
 
 /// The signal that is sent to the KvServer indicanting that it should stop running
 #[derive(Debug, Clone)]
-pub struct KvServerShutdownTrigger(Arc<AtomicBool>, SocketAddr);
+pub struct KvServerShutdownTrigger(Arc<AtomicBool>);
 
 impl KvServerShutdownTrigger {
     /// Creates a new Shutdown signal
-    pub fn new(server_addresss: SocketAddr) -> Self {
-        Self(Arc::new(AtomicBool::new(false)), server_addresss)
+    pub fn new() -> Self {
+        Self(Arc::new(AtomicBool::new(false)))
     }
 
     /// Fires a signal to the server indicating that it must shutdown
     pub fn trigger(&self) -> Result<(), KvServerShutdownTriggerError> {
-        self.0.store(true, Ordering::SeqCst);
-        TcpStream::connect(&self.1)?;
+        self.0.store(true, Ordering::Relaxed);
         Ok(())
     }
 
     /// Tells if the signal was fired
     pub fn must_shutdown(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
+        self.0.load(Ordering::Relaxed)
     }
 }
 
@@ -112,6 +122,12 @@ pub enum KvServerCreationError<'a> {
         cause: String,
     },
 
+    /// IO operation failed
+    IoError {
+        /// Internal cause
+        cause: std::io::Error,
+    },
+
     /// The listener failed to start
     UnableToStartListener,
 }
@@ -138,6 +154,9 @@ impl<'a> fmt::Display for KvServerCreationError<'a> {
                 format_args!("Invalid socket address: {}. Error: {}", addr, cause),
             ),
             KvServerCreationError::UnableToStartListener => f.write_str("Could not start listener"),
+            KvServerCreationError::IoError { cause } => {
+                f.write_fmt(format_args!("IO operation failed with error: {}", cause))
+            }
         }
     }
 }
@@ -156,6 +175,7 @@ where
         address: &'a str,
         thread_pool: Tp,
         logger: Logger,
+        signals: Option<Signals>,
     ) -> Result<Self, KvServerCreationError<'a>> {
         let address = match address.parse::<SocketAddr>() {
             Ok(addr) => addr,
@@ -166,92 +186,165 @@ where
                 })
             }
         };
-        let listener = std::net::TcpListener::bind(address).map_err(|e| {
-            error!(logger, "Could not open listener on address {}", address; "error" => e.to_string());
-            KvServerCreationError::UnableToStartListener
-        })?;
         Ok(Self {
             db: engine,
             address,
             thread_pool,
             logger,
-            shutdown_trigger: KvServerShutdownTrigger::new(address),
-            listener,
+            shutdown_trigger: KvServerShutdownTrigger::new(),
+            signals,
         })
     }
 
     /// Starts listening for connections and enter the forever loop handling server connections
-    pub fn run(&self) -> Result<(), i32> {
-        for stream in self.listener.incoming() {
+    pub fn run(&mut self) -> Result<(), i32> {
+        let mut listener = unwrap_or_return_code1_on_err!(
+            TcpListener::bind(self.address),
+            self.logger,
+            format!("open listener on address {}", self.address)
+        );
+        let mut poll = unwrap_or_return_code1_on_err!(Poll::new(), self.logger, "create a poll");
+        unwrap_or_return_code1_on_err!(
+            poll.registry()
+                .register(&mut listener, SERVER_TOKEN, Interest::READABLE),
+            self.logger,
+            "register event source: listener"
+        );
+        let mut timer = unwrap_or_return_code1_on_err!(
+            TimerFd::new(ClockId::Monotonic),
+            self.logger,
+            "create a timer"
+        );
+        unwrap_or_return_code1_on_err!(
+            timer.set_timeout_interval(&std::time::Duration::from_millis(100)),
+            self.logger,
+            "setup the timer"
+        );
+        unwrap_or_return_code1_on_err!(
+            poll.registry()
+                .register(&mut timer, SERVER_TIMER_TOKEN, Interest::READABLE),
+            self.logger,
+            "register event source: timer"
+        );
+        if let Some(signals) = &mut self.signals {
+            unwrap_or_return_code1_on_err!(
+                poll.registry()
+                    .register(signals, SERVER_SIGNALS_TOKEN, Interest::READABLE),
+                self.logger,
+                "register event source: signal handler"
+            );
+        }
+        let mut events = Events::with_capacity(128);
+        loop {
+            unwrap_or_return_code1_on_err!(
+                poll.poll(&mut events, None),
+                self.logger,
+                "poll the server for events"
+            );
             if self.shutdown_trigger.must_shutdown() {
-                info!(self.logger, "server stopped listening to connections");
+                info!(self.logger, "server is shutting down");
                 break;
             }
-            let log_server = self.logger.clone();
-            let db = self.db.clone();
-            self.thread_pool.spawn(move || {
-                let mut stream = unwrap_or_return_on_err!(stream, log_server, "open connection");
-                let peer_addr = unwrap_or_return_on_err!(
-                    stream.peer_addr(),
-                    log_server,
-                    "get the peer address from connection"
-                );
-                info!(log_server, "acceppted connection"; "peer" => peer_addr);
-                let _log_conn_closed_guard = LogConnectionClosedGuard {
-                    peer_addr,
-                    log_server: log_server.clone(),
-                };
-                match unwrap_or_return_on_err!(
-                    KvServer::<Engine, Tp>::recv_payload(&mut stream),
-                    log_server,
-                    "get the message payload from peer's message"
-                ) {
-                    MessagePayload::Request(Request::Set(req)) => {
-                        info!(log_server, "received message"; "peer" => peer_addr, "payload_type" => "RequestSet", "key" => req.key(), "value" => req.value());
-                        let res = db.set(req.key().to_owned(), req.value().to_owned());
-                        let resp = ResponseSet::new_message(StatusCode::from(&res));
-                        unwrap_or_return_on_err!(
-                            KvServer::<Engine, Tp>::send_response(&resp, &mut stream),
-                            log_server,
-                            "send response to peer"
-                        );
-                        info!(log_server, "sent message"; "peer" => peer_addr, "payload_type" => "ResponseSet", "status" => StatusCode::from(&res).to_string());
+            for event in events.iter() {
+                match event.token() {
+                    SERVER_TOKEN => {
+                        let log_server = self.logger.clone();
+                        let db = self.db.clone();
+                        let (mut stream, peer_addr) = match listener.accept() {
+                            Ok((stream, address)) => (stream, address),
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                break;
+                            }
+                            Err(e) => {
+                                error!(self.logger, "Server failed while polling for events"; "error" => e);
+                                return Err(1);
+                            }
+                        };
+                        self.thread_pool.spawn(move || {
+                            info!(log_server, "Acceppted connection"; "peer" => peer_addr);
+                            let _log_conn_closed_guard = LogConnectionClosedGuard {
+                                peer_addr,
+                                log_server: log_server.clone(),
+                            };
+                            match unwrap_or_return_on_err!(
+                                KvServer::<Engine, Tp>::recv_payload(&mut stream),
+                                log_server,
+                                "get the message payload from peer's message"
+                            ) {
+                                MessagePayload::Request(Request::Set(req)) => {
+                                    info!(log_server, "received message"; "peer" => peer_addr, "payload_type" => "RequestSet", "key" => req.key(), "value" => req.value());
+                                    let res = db.set(req.key().to_owned(), req.value().to_owned());
+                                    let resp = ResponseSet::new_message(StatusCode::from(&res));
+                                    unwrap_or_return_on_err!(
+                                        KvServer::<Engine, Tp>::send_response(&resp, &mut stream),
+                                        log_server,
+                                        "send response to peer"
+                                    );
+                                    info!(log_server, "sent message"; "peer" => peer_addr, "payload_type" => "ResponseSet", "status" => StatusCode::from(&res).to_string());
+                                }
+                                MessagePayload::Request(Request::Get(req)) => {
+                                    info!(log_server, "received message"; "peer" => peer_addr, "payload_type" => "RequestGet", "key" => req.key());
+                                    let res = db.get(req.key().to_owned());
+                                    let value = res.as_ref().unwrap_or(&None).clone();
+                                    let resp = ResponseGet::new_message(StatusCode::from(&res), value.clone());
+                                    unwrap_or_return_on_err!(
+                                        KvServer::<Engine, Tp>::send_response(&resp, &mut stream),
+                                        log_server,
+                                        "send response to peer"
+                                    );
+                                    info!(log_server, "sent message"; "peer" => peer_addr, "payload_type" => "ResponseGet", "status" => StatusCode::from(&res).to_string(), "value" => value);
+                                }
+                                MessagePayload::Request(Request::Remove(req)) => {
+                                    info!(log_server, "received message"; "peer" => peer_addr, "payload_type" => "RequestRemove", "key" => req.key());
+                                    let res = db.remove(req.key().to_owned());
+                                    let resp = ResponseRemove::new_message(StatusCode::from(&res));
+                                    unwrap_or_return_on_err!(
+                                        KvServer::<Engine, Tp>::send_response(&resp, &mut stream),
+                                        log_server,
+                                        "send response to peer"
+                                    );
+                                    info!(log_server, "sent message"; "peer" => peer_addr, "payload_type" => "ResponseRemove", "status" => StatusCode::from(&res).to_string());
+                                }
+                                MessagePayload::Response(_) => {
+                                    // Error: client sent a response message
+                                    error!(log_server, "received message"; "peer" => peer_addr, "payload_type" => "Response");
+                                    let resp = ResponseSet::new_message(StatusCode::FatalError);
+                                    unwrap_or_return_on_err!(
+                                        KvServer::<Engine, Tp>::send_response(&resp, &mut stream),
+                                        log_server,
+                                        "send response to peer"
+                                    );
+                                }
+                            }
+                        });
                     }
-                    MessagePayload::Request(Request::Get(req)) => {
-                        info!(log_server, "received message"; "peer" => peer_addr, "payload_type" => "RequestGet", "key" => req.key());
-                        let res = db.get(req.key().to_owned());
-                        let value = res.as_ref().unwrap_or(&None).clone();
-                        let resp = ResponseGet::new_message(StatusCode::from(&res), value.clone());
-                        unwrap_or_return_on_err!(
-                            KvServer::<Engine, Tp>::send_response(&resp, &mut stream),
-                            log_server,
-                            "send response to peer"
-                        );
-                        info!(log_server, "sent message"; "peer" => peer_addr, "payload_type" => "ResponseGet", "status" => StatusCode::from(&res).to_string(), "value" => value);
+                    SERVER_TIMER_TOKEN => {}
+                    SERVER_SIGNALS_TOKEN => {
+                        if let Some(signals) = &mut self.signals {
+                            loop {
+                                match unwrap_or_return_code1_on_err!(
+                                    signals.receive(),
+                                    self.logger,
+                                    "retrieve received signal"
+                                ) {
+                                    Some(Signal::Interrupt)
+                                    | Some(Signal::Terminate)
+                                    | Some(Signal::Quit) => {
+                                        info!(self.logger, "server is shutting down");
+                                        return Ok(());
+                                    }
+                                    None => break,
+                                    Some(sig) => {
+                                        error!(self.logger, "received unexpected signal"; "signal" => format!("{:?}",sig));
+                                        return Err(1);
+                                    }
+                                }
+                            }
+                        }
                     }
-                    MessagePayload::Request(Request::Remove(req)) => {
-                        info!(log_server, "received message"; "peer" => peer_addr, "payload_type" => "RequestRemove", "key" => req.key());
-                        let res = db.remove(req.key().to_owned());
-                        let resp = ResponseRemove::new_message(StatusCode::from(&res));
-                        unwrap_or_return_on_err!(
-                            KvServer::<Engine, Tp>::send_response(&resp, &mut stream),
-                            log_server,
-                            "send response to peer"
-                        );
-                        info!(log_server, "sent message"; "peer" => peer_addr, "payload_type" => "ResponseRemove", "status" => StatusCode::from(&res).to_string());
-                    }
-                    MessagePayload::Response(_) => {
-                        // Error: client sent a response message
-                        error!(log_server, "received message"; "peer" => peer_addr, "payload_type" => "Response");
-                        let resp = ResponseSet::new_message(StatusCode::FatalError);
-                        unwrap_or_return_on_err!(
-                            KvServer::<Engine, Tp>::send_response(&resp, &mut stream),
-                            log_server,
-                            "send response to peer"
-                        );
-                    }
+                    _ => unreachable!(),
                 }
-            });
+            }
         }
         Ok(())
     }

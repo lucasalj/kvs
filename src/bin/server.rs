@@ -15,6 +15,8 @@ use serde::{Deserialize, Serialize};
 use slog::{Drain, Logger};
 use std::net::SocketAddr;
 
+use mio_signals::{Signal, Signals};
+
 const DEFAULT_SERVER_IP_PORT: &'static str = "127.0.0.1:4000";
 const DEFAULT_CONF_FILE_PATH: &'static str = "./.kvs-server-conf.json";
 
@@ -86,6 +88,14 @@ fn check_engine(engine: &str, config_file_path: &str, log_server: Logger) -> Res
 }
 
 fn run_server_logging(engine: String, server_addr: String) -> Result<(), i32> {
+    let signals =
+        Signals::new(Signal::Interrupt | Signal::Terminate | Signal::Quit).map_err(|e| {
+            eprintln!(
+                "Could not setup signal handlers for kvs server. Operation failed with error: {}",
+                e
+            );
+            1i32
+        })?;
     let decorator = slog_term::TermDecorator::new().stderr().build();
     let drain = slog_term::FullFormat::new(decorator)
         .use_file_location()
@@ -104,7 +114,7 @@ fn run_server_logging(engine: String, server_addr: String) -> Result<(), i32> {
 
     match engine.as_str() {
         "kvs" => {
-            let server = KvServer::new(
+            let mut server = KvServer::new(
                 unwrap_or_return_code1_on_err!(
                     KvStore::open("./"),
                     log_server,
@@ -117,13 +127,14 @@ fn run_server_logging(engine: String, server_addr: String) -> Result<(), i32> {
                     "instantiate a thread pool"
                 ),
                 log_server,
+                Some(signals),
             )
             .unwrap();
 
             server.run()?;
         }
         "sled" => {
-            let server = KvServer::new(
+            let mut server = KvServer::new(
                 unwrap_or_return_code1_on_err!(
                     SledKvsEngine::open("./"),
                     log_server,
@@ -136,6 +147,7 @@ fn run_server_logging(engine: String, server_addr: String) -> Result<(), i32> {
                     "instantiate a thread pool"
                 ),
                 log_server,
+                Some(signals),
             )
             .unwrap();
 

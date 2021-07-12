@@ -163,7 +163,7 @@ fn write_queued_kvstore(
         .as_str(),
     );
 
-    let server = KvServer::new(
+    let mut server = KvServer::new(
         KvStore::open(temp_dir.path()).expect("unable to open database file"),
         server_addr.as_str(),
         SharedQueueThreadPool::new(*threads).expect(
@@ -174,6 +174,7 @@ fn write_queued_kvstore(
             .as_str(),
         ),
         slog::Logger::root(slog::Discard, o!("" => "")),
+        None,
     )
     .expect("unable to start the kvs server");
     let server_shutdown_trigger = server.get_shutdown_trigger();
@@ -247,7 +248,7 @@ fn read_queued_kvstore(
         .as_str(),
     );
 
-    let server = KvServer::new(
+    let mut server = KvServer::new(
         KvStore::open(temp_dir.path()).expect("unable to open database file"),
         server_addr.as_str(),
         SharedQueueThreadPool::new(*threads).expect(
@@ -258,6 +259,7 @@ fn read_queued_kvstore(
             .as_str(),
         ),
         slog::Logger::root(slog::Discard, o!("" => "")),
+        None,
     )
     .expect("unable to start the kvs server");
     let server_shutdown_trigger = server.get_shutdown_trigger();
@@ -337,7 +339,7 @@ pub fn write_rayon_kvstore(
         .as_str(),
     );
 
-    let server = KvServer::new(
+    let mut server = KvServer::new(
         KvStore::open(temp_dir.path()).expect("unable to open database file"),
         server_addr.as_str(),
         RayonThreadPool::new(*threads).expect(
@@ -348,6 +350,7 @@ pub fn write_rayon_kvstore(
             .as_str(),
         ),
         slog::Logger::root(slog::Discard, o!("" => "")),
+        None,
     )
     .expect("unable to start the kvs server");
     let server_shutdown_trigger = server.get_shutdown_trigger();
@@ -421,7 +424,7 @@ pub fn read_rayon_kvstore(
         .as_str(),
     );
 
-    let server = KvServer::new(
+    let mut server = KvServer::new(
         KvStore::open(temp_dir.path()).expect("unable to open database file"),
         server_addr.as_str(),
         RayonThreadPool::new(*threads).expect(
@@ -432,6 +435,7 @@ pub fn read_rayon_kvstore(
             .as_str(),
         ),
         slog::Logger::root(slog::Discard, o!("" => "")),
+        None,
     )
     .expect("unable to start the kvs server");
     let server_shutdown_trigger = server.get_shutdown_trigger();
@@ -511,7 +515,7 @@ pub fn write_rayon_sledkvengine(
         .as_str(),
     );
 
-    let server = KvServer::new(
+    let mut server = KvServer::new(
         SledKvsEngine::open(temp_dir.path()).expect("unable to open database file"),
         server_addr.as_str(),
         RayonThreadPool::new(*threads).expect(
@@ -522,6 +526,7 @@ pub fn write_rayon_sledkvengine(
             .as_str(),
         ),
         slog::Logger::root(slog::Discard, o!("" => "")),
+        None,
     )
     .expect("unable to start the kvs server");
     let server_shutdown_trigger = server.get_shutdown_trigger();
@@ -595,7 +600,7 @@ pub fn read_rayon_sledkvengine(
         .as_str(),
     );
 
-    let server = KvServer::new(
+    let mut server = KvServer::new(
         SledKvsEngine::open(temp_dir.path()).expect("unable to open database file"),
         server_addr.as_str(),
         RayonThreadPool::new(*threads).expect(
@@ -606,6 +611,7 @@ pub fn read_rayon_sledkvengine(
             .as_str(),
         ),
         slog::Logger::root(slog::Discard, o!("" => "")),
+        None,
     )
     .expect("unable to start the kvs server");
     let server_shutdown_trigger = server.get_shutdown_trigger();

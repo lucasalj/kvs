@@ -26,6 +26,9 @@ num_cpus = "1.13.0"
 rayon = "1.5.1"
 portpicker = "0.1.1"
 parking_lot = "0.11.1"
+mio = { version = "0.7", features = ["os-poll", "net"] }
+mio-timerfd = "0.2"
+mio-signals = "0.1"
 
 [dev-dependencies]
 assert_cmd = "0.11"
