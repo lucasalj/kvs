@@ -7,7 +7,7 @@ use std::{
     collections::HashMap,
     fmt::Debug,
     fs::{self, File, OpenOptions},
-    io::{BufReader, Seek, SeekFrom, Write},
+    io::{BufReader, BufWriter, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     result,
     sync::Arc,
@@ -41,7 +41,8 @@ struct KvStoreDb {
     storage_index: HashMap<String, CommandIndex>,
     log_dir_path: PathBuf,
     old_logs: Vec<OldLogInfo>,
-    curr_log: LogFile,
+    curr_log_w: LogFileWriter,
+    curr_log_r: LogFileReader,
     total_cmd_counter: u64,
 }
 
@@ -77,12 +78,20 @@ struct OldLogInfo {
     cmd_counter: u64,
 }
 
-/// Information about the current log file
+/// Information about the current log file writer
 #[derive(Debug)]
-struct LogFile {
+struct LogFileWriter {
     id: u64,
-    file: File,
+    writer: BufWriter<File>,
     cmd_counter: u64,
+    offset: u64,
+}
+
+/// Information about the current log file reader
+#[derive(Debug)]
+struct LogFileReader {
+    id: u64,
+    reader: BufReader<File>,
     offset: u64,
 }
 
@@ -100,55 +109,76 @@ impl KvStoreDb {
     where
         P: Into<PathBuf>,
     {
-        let path = (path.into() as PathBuf).canonicalize()?.join("");
+        let log_dir_path = (path.into() as PathBuf).canonicalize()?.join("");
 
-        let (data_index, total_cmd_counter, mut old_log_files_data) =
-            KvStoreDb::build_index(path.as_path())?;
+        let (storage_index, total_cmd_counter, mut old_logs) =
+            KvStoreDb::build_index(log_dir_path.as_path())?;
 
-        if let Some(OldLogInfo {
-            id: curr_log_file_id,
-            cmd_counter: curr_log_cmd_counter,
-        }) = old_log_files_data.pop()
-        {
+        if let Some(OldLogInfo { id, cmd_counter }) = old_logs.pop() {
             // There already exists a file, just open the last (current) one
-            let curr_log_file_path = path.join(format!(
-                "{}{}{}",
-                LOG_FILE_PREFIX, curr_log_file_id, LOG_FILE_SUFFIX
-            ));
-            let mut curr_log_file = OpenOptions::new()
-                .append(true)
-                .create(false)
-                .open(curr_log_file_path.as_path())?;
-            let curr_log_offset = curr_log_file.seek(SeekFrom::End(0))?;
+            let file_path =
+                log_dir_path.join(format!("{}{}{}", LOG_FILE_PREFIX, id, LOG_FILE_SUFFIX));
+            let mut writer = BufWriter::new(
+                OpenOptions::new()
+                    .append(true)
+                    .create(false)
+                    .open(file_path.as_path())?,
+            );
+            let offset = writer.seek(SeekFrom::End(0))?;
+            let reader = BufReader::new(
+                OpenOptions::new()
+                    .read(true)
+                    .create(false)
+                    .open(file_path.as_path())?,
+            );
 
             Ok(KvStoreDb {
-                storage_index: data_index,
-                log_dir_path: path,
-                old_logs: old_log_files_data,
-                curr_log: LogFile {
-                    id: curr_log_file_id,
-                    file: curr_log_file,
-                    cmd_counter: curr_log_cmd_counter,
-                    offset: curr_log_offset,
+                storage_index,
+                log_dir_path,
+                old_logs,
+                curr_log_w: LogFileWriter {
+                    id,
+                    writer,
+                    cmd_counter,
+                    offset,
+                },
+                curr_log_r: LogFileReader {
+                    id,
+                    reader,
+                    offset: 0,
                 },
                 total_cmd_counter,
             })
         } else {
             // Create new log file, because there is none
-            let curr_log_file_path =
-                path.join(format!("{}{}{}", LOG_FILE_PREFIX, 0, LOG_FILE_SUFFIX));
+            let file_path =
+                log_dir_path.join(format!("{}{}{}", LOG_FILE_PREFIX, 0, LOG_FILE_SUFFIX));
+            let writer = BufWriter::new(
+                OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .open(file_path.as_path())?,
+            );
+            let reader = BufReader::new(
+                OpenOptions::new()
+                    .read(true)
+                    .create(false)
+                    .open(file_path.as_path())?,
+            );
 
             Ok(KvStoreDb {
-                storage_index: data_index,
-                log_dir_path: path,
-                old_logs: old_log_files_data,
-                curr_log: LogFile {
+                storage_index,
+                log_dir_path,
+                old_logs,
+                curr_log_w: LogFileWriter {
                     id: 0,
-                    file: OpenOptions::new()
-                        .append(true)
-                        .create(true)
-                        .open(curr_log_file_path.as_path())?,
+                    writer,
                     cmd_counter: 0,
+                    offset: 0,
+                },
+                curr_log_r: LogFileReader {
+                    id: 0,
+                    reader,
                     offset: 0,
                 },
                 total_cmd_counter,
@@ -165,28 +195,30 @@ impl KvStoreDb {
 
     /// Check if it should create a new log file
     fn should_create_new_file(&self) -> bool {
-        self.curr_log.offset > CURR_FILE_OFFSET_THRESHOLD
-            || self.curr_log.cmd_counter > (CMDS_THRESHOLD / 2)
+        self.curr_log_w.offset > CURR_FILE_OFFSET_THRESHOLD
+            || self.curr_log_w.cmd_counter > (CMDS_THRESHOLD / 2)
     }
 
     /// Create a new log following the format for log file name and save the current log file information
     /// in memory.
     fn do_create_new_file(&mut self) -> Result<()> {
         self.old_logs.push(OldLogInfo {
-            id: self.curr_log.id,
-            cmd_counter: self.curr_log.cmd_counter,
+            id: self.curr_log_w.id,
+            cmd_counter: self.curr_log_w.cmd_counter,
         });
-        let new_file_id = self.curr_log.id + 1;
+        let new_file_id = self.curr_log_w.id + 1;
         let new_file_path = self.log_dir_path.join(format!(
             "{}{}{}",
             LOG_FILE_PREFIX, new_file_id, LOG_FILE_SUFFIX
         ));
-        self.curr_log = LogFile {
+        self.curr_log_w = LogFileWriter {
             id: new_file_id,
-            file: OpenOptions::new()
-                .append(true)
-                .create(true)
-                .open(new_file_path.as_path())?,
+            writer: BufWriter::new(
+                OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .open(new_file_path.as_path())?,
+            ),
             cmd_counter: 0,
             offset: 0,
         };
@@ -253,8 +285,8 @@ impl KvStoreDb {
                     rdr.seek(SeekFrom::Start(self.storage_index.get(k).unwrap().offset))?;
                     let cmd = bincode::deserialize_from::<_, Command>(&mut rdr)?;
                     let new_index = CommandIndex {
-                        log_id: self.curr_log.id,
-                        offset: self.curr_log.offset,
+                        log_id: self.curr_log_w.id,
+                        offset: self.curr_log_w.offset,
                     };
                     self.write_cmd_to_curr_log(cmd)?;
                     self.storage_index.insert(k.into(), new_index);
@@ -284,29 +316,38 @@ impl KvStoreDb {
 
     /// Serializes the command using bincode crate and write it down to the current log
     fn write_cmd_to_curr_log(&mut self, cmd: Command) -> Result<()> {
-        let cmd_serialized = bincode::serialize(&cmd)?;
-        let mut writer = std::io::BufWriter::new(&mut self.curr_log.file);
-        writer.write_all(&*cmd_serialized)?;
+        let cmd_size = bincode::serialized_size(&cmd)?;
+        bincode::serialize_into(&mut self.curr_log_w.writer, &cmd)?;
         self.total_cmd_counter += 1;
-        self.curr_log.cmd_counter += 1;
-        self.curr_log.offset += cmd_serialized.len() as u64;
-        writer.flush()?;
+        self.curr_log_w.cmd_counter += 1;
+        self.curr_log_w.offset += cmd_size;
         Ok(())
     }
 
     /// Given a file name and an offset, access that position in the log file and returns the value if found.
-    fn read_value_from_log_at<P>(&mut self, file_path: P, offset: u64) -> Result<String>
-    where
-        P: AsRef<Path>,
-    {
-        let mut rdr = BufReader::new(
-            OpenOptions::new()
-                .read(true)
-                .create(false)
-                .open(file_path.as_ref())?,
-        );
-        rdr.seek(SeekFrom::Start(offset))?;
-        let cmd = bincode::deserialize_from::<_, Command>(rdr)?;
+    fn read_value_from_log_at(&mut self, log_id: u64, offset: u64) -> Result<String> {
+        if log_id != self.curr_log_r.id {
+            let file_path = self
+                .log_dir_path
+                .join(format!("{}{}{}", LOG_FILE_PREFIX, log_id, LOG_FILE_SUFFIX));
+            let file_reader = BufReader::new(
+                OpenOptions::new()
+                    .read(true)
+                    .create(false)
+                    .open(file_path)?,
+            );
+            self.curr_log_r = LogFileReader {
+                id: log_id,
+                reader: file_reader,
+                offset: 0,
+            };
+        }
+        if offset != self.curr_log_r.offset {
+            self.curr_log_r.reader.seek(SeekFrom::Start(offset))?;
+            self.curr_log_r.offset = offset;
+        }
+        let cmd = bincode::deserialize_from::<_, Command>(&mut self.curr_log_r.reader)?;
+        self.curr_log_r.offset += bincode::serialized_size(&cmd)?;
         if let Command::Set { key: _, value } = cmd {
             Ok(value)
         } else {
@@ -388,8 +429,8 @@ impl KvStoreDb {
 
     fn set(&mut self, key: String, value: String) -> Result<()> {
         let new_index = CommandIndex {
-            log_id: self.curr_log.id,
-            offset: self.curr_log.offset,
+            log_id: self.curr_log_w.id,
+            offset: self.curr_log_w.offset,
         };
 
         let cmd = Command::Set {
@@ -409,20 +450,18 @@ impl KvStoreDb {
             self.do_create_new_file()?;
         }
 
+        self.curr_log_w.writer.flush()?;
+
         Ok(())
     }
 
     fn get(&mut self, key: String) -> Result<Option<String>> {
-        match self.storage_index.get(&key).map(|lci| {
-            (
-                self.log_dir_path.join(format!(
-                    "{}{}{}",
-                    LOG_FILE_PREFIX, lci.log_id, LOG_FILE_SUFFIX
-                )),
-                lci.offset,
-            )
-        }) {
-            Some((log_path, offset)) => Ok(Some(self.read_value_from_log_at(log_path, offset)?)),
+        match self
+            .storage_index
+            .get(&key)
+            .map(|lci| (lci.log_id, lci.offset))
+        {
+            Some((id, offset)) => Ok(Some(self.read_value_from_log_at(id, offset)?)),
             None => Ok(None),
         }
     }
@@ -440,6 +479,9 @@ impl KvStoreDb {
             if self.should_create_new_file() {
                 self.do_create_new_file()?;
             }
+
+            self.curr_log_w.writer.flush()?;
+
             Ok(())
         }
     }
