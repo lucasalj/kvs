@@ -116,8 +116,7 @@ impl KvStoreDb {
 
         if let Some(OldLogInfo { id, cmd_counter }) = old_logs.pop() {
             // There already exists a file, just open the last (current) one
-            let file_path =
-                log_dir_path.join(format!("{}{}{}", LOG_FILE_PREFIX, id, LOG_FILE_SUFFIX));
+            let file_path = KvStoreDb::format_log_path(log_dir_path.as_path(), id);
             let mut writer = BufWriter::new(
                 OpenOptions::new()
                     .append(true)
@@ -151,8 +150,7 @@ impl KvStoreDb {
             })
         } else {
             // Create new log file, because there is none
-            let file_path =
-                log_dir_path.join(format!("{}{}{}", LOG_FILE_PREFIX, 0, LOG_FILE_SUFFIX));
+            let file_path = KvStoreDb::format_log_path(log_dir_path.as_path(), 0);
             let writer = BufWriter::new(
                 OpenOptions::new()
                     .append(true)
@@ -207,10 +205,7 @@ impl KvStoreDb {
             cmd_counter: self.curr_log_w.cmd_counter,
         });
         let new_file_id = self.curr_log_w.id + 1;
-        let new_file_path = self.log_dir_path.join(format!(
-            "{}{}{}",
-            LOG_FILE_PREFIX, new_file_id, LOG_FILE_SUFFIX
-        ));
+        let new_file_path = KvStoreDb::format_log_path(self.log_dir_path.as_path(), new_file_id);
         self.curr_log_w = LogFileWriter {
             id: new_file_id,
             writer: BufWriter::new(
@@ -270,10 +265,7 @@ impl KvStoreDb {
         });
 
         for fk in files_compaction_info {
-            let log_path = self.log_dir_path.join(format!(
-                "{}{}{}",
-                LOG_FILE_PREFIX, fk.log_id, LOG_FILE_SUFFIX
-            ));
+            let log_path = KvStoreDb::format_log_path(self.log_dir_path.as_path(), fk.log_id);
             {
                 let mut rdr = BufReader::new(
                     OpenOptions::new()
@@ -327,9 +319,7 @@ impl KvStoreDb {
     /// Given a file name and an offset, access that position in the log file and returns the value if found.
     fn read_value_from_log_at(&mut self, log_id: u64, offset: u64) -> Result<String> {
         if log_id != self.curr_log_r.id {
-            let file_path = self
-                .log_dir_path
-                .join(format!("{}{}{}", LOG_FILE_PREFIX, log_id, LOG_FILE_SUFFIX));
+            let file_path = KvStoreDb::format_log_path(self.log_dir_path.as_path(), log_id);
             let file_reader = BufReader::new(
                 OpenOptions::new()
                     .read(true)
@@ -484,6 +474,12 @@ impl KvStoreDb {
 
             Ok(())
         }
+    }
+
+    fn format_log_path<P: Into<PathBuf>>(log_dir: P, log_id: u64) -> PathBuf {
+        log_dir
+            .into()
+            .join(format!("{}{}{}", LOG_FILE_PREFIX, log_id, LOG_FILE_SUFFIX))
     }
 }
 
