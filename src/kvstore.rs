@@ -4,7 +4,7 @@ use kvsengine::KvsEngine;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap as StdHashMap, HashSet as StdHashSet},
     fmt::Debug,
     fs::{self, File, OpenOptions},
     io::{BufReader, BufWriter, Seek, SeekFrom, Write},
@@ -38,9 +38,8 @@ pub struct KvStore {
 
 #[derive(Debug)]
 struct KvStoreDb {
-    storage_index: HashMap<String, CommandIndex>,
+    storage_index: StdHashMap<String, CommandIndex>,
     log_dir_path: PathBuf,
-    old_logs: Vec<OldLogInfo>,
     curr_log_w: LogFileWriter,
     curr_log_r: LogFileReader,
     total_cmd_counter: u64,
@@ -61,14 +60,6 @@ enum Command {
 struct CommandIndex {
     log_id: u64,
     offset: u64,
-}
-
-/// Information about a log file to be used by the compaction algorithm
-#[derive(Debug)]
-struct LogCompactionInfo {
-    log_id: u64,
-    keys: Vec<String>,
-    cmd_counter: u64,
 }
 
 /// General information about the old log files
@@ -134,7 +125,6 @@ impl KvStoreDb {
             Ok(KvStoreDb {
                 storage_index,
                 log_dir_path,
-                old_logs,
                 curr_log_w: LogFileWriter {
                     id,
                     writer,
@@ -167,7 +157,6 @@ impl KvStoreDb {
             Ok(KvStoreDb {
                 storage_index,
                 log_dir_path,
-                old_logs,
                 curr_log_w: LogFileWriter {
                     id: 0,
                     writer,
@@ -200,10 +189,6 @@ impl KvStoreDb {
     /// Create a new log following the format for log file name and save the current log file information
     /// in memory.
     fn do_create_new_file(&mut self) -> Result<()> {
-        self.old_logs.push(OldLogInfo {
-            id: self.curr_log_w.id,
-            cmd_counter: self.curr_log_w.cmd_counter,
-        });
         let new_file_id = self.curr_log_w.id + 1;
         let new_file_path = KvStoreDb::format_log_path(self.log_dir_path.as_path(), new_file_id);
         self.curr_log_w = LogFileWriter {
@@ -221,86 +206,66 @@ impl KvStoreDb {
     }
 
     /// Runs the following compaction strategy:
-    ///     1. Collect all keys that map to the current active values and the file names for the values.
-    ///     2. Using the previous information, collect all log files information (except for the current one), which are their:
-    ///        file name, active keys and their total number of commands written.
-    ///     3. Sort the log files information by their number of active keys divided by their total number of commands.
-    ///     4. For each file read all of its active keys, write them down to the current log and after that delete the file and
-    ///        its information stored in memory.
+    ///     1. Collect all command offsets related to each active entry from the storage index map and rearrange them in a map where
+    ///        the keys are the log file ids and the value is a set of offsets of each active entry in that corresponding file.
+    ///     2. List all the log file names and ids in the database directory sorted by name.
+    ///     3. For each file read all of its commands, if the command is a set and refers to an active entry, write it down to
+    ///        the current log and after processing all of the file commands, delete the file.
     fn do_compaction(&mut self) -> Result<()> {
-        let keys_by_file_id = self
-            .storage_index
-            .iter()
-            .sorted_by(|(_, i1), (_, i2)| Ord::cmp(&i1.log_id, &i2.log_id))
-            .group_by(|(_, i1)| i1.log_id)
-            .into_iter()
-            .map(|(p, i)| (p, i.map(|(k, _)| k.as_str()).collect_vec()))
-            .collect::<HashMap<u64, Vec<&str>>>();
+        let active_file_id_offsets_map = self.get_active_file_id_offsets_map();
+        let curr_log_id = self.curr_log_w.id;
 
-        let mut files_compaction_info = self
-            .old_logs
-            .iter()
-            .map(|log_file_data| LogCompactionInfo {
-                log_id: log_file_data.id,
-                keys: keys_by_file_id
-                    .get(&log_file_data.id)
-                    .unwrap_or(&vec![])
-                    .iter()
-                    .map(|s| String::from(*s))
-                    .collect_vec(),
-                cmd_counter: log_file_data.cmd_counter,
-            })
+        let log_ids_files = KvStoreDb::list_log_ids_files_sorted(self.log_dir_path.as_path())
+            .filter(|(id, _)| *id < curr_log_id)
             .collect::<Vec<_>>();
 
-        files_compaction_info.sort_by(|fk1, fk2| {
-            let fk1_cmd_key_factor = match fk1.keys.len() {
-                0 => std::u64::MAX,
-                _ => fk1.cmd_counter / (fk1.keys.len() as u64),
-            };
-            let fk2_cmd_key_factor = match fk2.keys.len() {
-                0 => std::u64::MAX,
-                _ => fk2.cmd_counter / (fk2.keys.len() as u64),
-            };
-            Ord::cmp(&fk2_cmd_key_factor, &fk1_cmd_key_factor)
-        });
-
-        for fk in files_compaction_info {
-            let log_path = KvStoreDb::format_log_path(self.log_dir_path.as_path(), fk.log_id);
+        for (log_id, log_path) in log_ids_files {
             {
-                let mut rdr = BufReader::new(
+                let mut reader = BufReader::new(
                     OpenOptions::new()
                         .read(true)
                         .create(false)
                         .open(log_path.as_path())?,
                 );
-                for k in fk.keys.iter() {
-                    rdr.seek(SeekFrom::Start(self.storage_index.get(k).unwrap().offset))?;
-                    let cmd = bincode::deserialize_from::<_, Command>(&mut rdr)?;
-                    let new_index = CommandIndex {
-                        log_id: self.curr_log_w.id,
-                        offset: self.curr_log_w.offset,
-                    };
-                    self.write_cmd_to_curr_log(cmd)?;
-                    self.storage_index.insert(k.into(), new_index);
-
-                    if self.should_create_new_file() {
-                        self.do_create_new_file()?;
+                let mut log_file_cmd_counter = 0;
+                let active_offsets = active_file_id_offsets_map.get(&log_id);
+                loop {
+                    let offset = reader.seek(SeekFrom::Current(0))?;
+                    let res = bincode::deserialize_from::<_, Command>(&mut reader);
+                    let is_active_entry = active_offsets.and_then(|hs| hs.get(&offset)).is_some();
+                    match res {
+                        Ok(Command::Set { key, value }) => {
+                            log_file_cmd_counter += 1;
+                            if is_active_entry {
+                                {
+                                    self.storage_index.insert(
+                                        key.clone(),
+                                        CommandIndex {
+                                            log_id: self.curr_log_w.id,
+                                            offset: self.curr_log_w.offset,
+                                        },
+                                    );
+                                    self.write_cmd_to_curr_log(Command::Set { key, value })?;
+                                }
+                            }
+                        }
+                        Ok(Command::Remove { key: _ }) => {
+                            log_file_cmd_counter += 1;
+                        }
+                        Err(err) => match *err {
+                            bincode::ErrorKind::Io(ref bincode_io_err) => {
+                                match bincode_io_err.kind() {
+                                    std::io::ErrorKind::UnexpectedEof => break,
+                                    _ => return Err(KvStoreError::from(err)),
+                                }
+                            }
+                            _ => return Err(KvStoreError::from(err)),
+                        },
                     }
                 }
-
-                self.total_cmd_counter -= fk.cmd_counter;
-                if let Ok(log_files_data_index) = self
-                    .old_logs
-                    .binary_search_by(|lfd| Ord::cmp(&lfd.id, &fk.log_id))
-                {
-                    self.old_logs.remove(log_files_data_index);
-                }
+                self.total_cmd_counter -= log_file_cmd_counter;
             }
             fs::remove_file(log_path.as_path())?;
-
-            if !self.should_run_compaction() {
-                break;
-            }
         }
 
         Ok(())
@@ -348,37 +313,18 @@ impl KvStoreDb {
     /// Given a directory path, finds and reads all the log files and returns the storage index,
     /// the total number of commands written in the log files and a vec with information to be used
     /// later by the compaction algorithm about each log file.
-    fn build_index<P>(dir_path: P) -> Result<(HashMap<String, CommandIndex>, u64, Vec<OldLogInfo>)>
+    fn build_index<P>(
+        dir_path: P,
+    ) -> Result<(StdHashMap<String, CommandIndex>, u64, Vec<OldLogInfo>)>
     where
         P: AsRef<Path>,
     {
-        let mut storage_index = HashMap::new();
-        let log_file_entries = WalkDir::new(&dir_path)
-            .min_depth(1)
-            .max_depth(1)
-            .sort_by(|e1, e2| e1.file_name().cmp(e2.file_name()))
-            .into_iter()
-            .filter_entry(|e| {
-                e.file_name()
-                    .to_str()
-                    .map(|s| s.starts_with(LOG_FILE_PREFIX) && s.ends_with(LOG_FILE_SUFFIX))
-                    .unwrap_or(false)
-            });
-
+        let mut storage_index = StdHashMap::new();
         let mut total_cmds_counter = 0;
         let mut log_files_data = vec![];
-        for log_file_entry in log_file_entries {
+
+        for (log_id, log_file_path) in KvStoreDb::list_log_ids_files_sorted(dir_path.as_ref()) {
             let mut log_file_cmd_counter: u64 = 0;
-            let log_file_path = dir_path.as_ref().to_path_buf().join(log_file_entry?.path());
-            let file_name_str = log_file_path
-                .file_name()
-                .ok_or(KvStoreError::WrongFileNameFormat)?
-                .to_str()
-                .ok_or(KvStoreError::WrongFileNameFormat)?;
-            let log_id = file_name_str
-                [LOG_FILE_PREFIX.len()..(file_name_str.len() - LOG_FILE_SUFFIX.len())]
-                .parse::<u64>()
-                .map_err(|_| KvStoreError::WrongFileNameFormat)?;
             let mut log_file = OpenOptions::new()
                 .read(true)
                 .open(log_file_path.as_path())?;
@@ -477,9 +423,52 @@ impl KvStoreDb {
     }
 
     fn format_log_path<P: Into<PathBuf>>(log_dir: P, log_id: u64) -> PathBuf {
-        log_dir
-            .into()
-            .join(format!("{}{}{}", LOG_FILE_PREFIX, log_id, LOG_FILE_SUFFIX))
+        log_dir.into().join(format!(
+            "{}{:032}{}",
+            LOG_FILE_PREFIX, log_id, LOG_FILE_SUFFIX
+        ))
+    }
+
+    fn list_log_ids_files_sorted<P: Into<PathBuf>>(
+        log_dir: P,
+    ) -> impl Iterator<Item = (u64, PathBuf)> {
+        let log_dir = log_dir.into();
+        WalkDir::new(log_dir.as_path())
+            .min_depth(1)
+            .max_depth(1)
+            .sort_by(|e1, e2| Ord::cmp(&e1.file_name(), &e2.file_name()))
+            .into_iter()
+            .filter_entry(|e| {
+                e.file_name()
+                    .to_str()
+                    .map(|s| s.starts_with(LOG_FILE_PREFIX) && s.ends_with(LOG_FILE_SUFFIX))
+                    .unwrap_or(false)
+            })
+            .filter_map(move |r| {
+                if let Ok(entry) = r {
+                    entry.file_name().to_str().and_then(|s| {
+                        if let Ok(id) = s[LOG_FILE_PREFIX.len()..(s.len() - LOG_FILE_SUFFIX.len())]
+                            .parse::<u64>()
+                        {
+                            Some((id, log_dir.join(s)))
+                        } else {
+                            None
+                        }
+                    })
+                } else {
+                    None
+                }
+            })
+    }
+
+    fn get_active_file_id_offsets_map(&self) -> StdHashMap<u64, StdHashSet<u64>> {
+        self.storage_index
+            .values()
+            .sorted_by(|i1, i2| Ord::cmp(&i1.log_id, &i2.log_id))
+            .group_by(|i1| i1.log_id)
+            .into_iter()
+            .map(|(p, i)| (p, i.map(|ci| ci.offset).collect::<StdHashSet<_>>()))
+            .collect::<StdHashMap<_, _>>()
     }
 }
 
