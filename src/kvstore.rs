@@ -65,13 +65,6 @@ struct CommandIndex {
     len: u64,
 }
 
-/// General information about the old log files
-#[derive(Debug)]
-struct OldLogInfo {
-    id: u64,
-    cmd_counter: u64,
-}
-
 /// Information about the current log file writer
 #[derive(Debug)]
 struct LogFileWriter {
@@ -174,36 +167,20 @@ impl KvStoreDb {
     {
         let log_dir_path = (path.into() as PathBuf).canonicalize()?.join("");
 
-        let (storage_index, total_cmd_counter, mut old_logs) =
+        let (storage_index, total_cmd_counter, log_id, cmd_counter) =
             KvStoreDb::build_index(log_dir_path.as_path())?;
 
-        if let Some(OldLogInfo { id, cmd_counter }) = old_logs.pop() {
-            // There already exists a file, just open the last (current) one
-            let file_path = KvStoreDb::format_log_path(log_dir_path.as_path(), id);
-            let curr_log_w = LogFileWriter::open(id, file_path.as_path(), cmd_counter)?;
-            let curr_log_r = LogFileReader::open(id, file_path.as_path())?;
+        let file_path = KvStoreDb::format_log_path(log_dir_path.as_path(), log_id);
+        let curr_log_w = LogFileWriter::open(log_id, file_path.as_path(), cmd_counter)?;
+        let curr_log_r = LogFileReader::open(log_id, file_path.as_path())?;
 
-            Ok(KvStoreDb {
-                storage_index,
-                log_dir_path,
-                curr_log_w,
-                curr_log_r,
-                total_cmd_counter,
-            })
-        } else {
-            // Create new log file, because there is none
-            let file_path = KvStoreDb::format_log_path(log_dir_path.as_path(), 0);
-            let curr_log_w = LogFileWriter::open(0, file_path.as_path(), 0)?;
-            let curr_log_r = LogFileReader::open(0, file_path.as_path())?;
-
-            Ok(KvStoreDb {
-                storage_index,
-                log_dir_path,
-                curr_log_w,
-                curr_log_r,
-                total_cmd_counter,
-            })
-        }
+        Ok(KvStoreDb {
+            storage_index,
+            log_dir_path,
+            curr_log_w,
+            curr_log_r,
+            total_cmd_counter,
+        })
     }
 
     /// Check if it should run compaction algorithm
@@ -309,18 +286,18 @@ impl KvStoreDb {
     /// Given a directory path, finds and reads all the log files and returns the storage index,
     /// the total number of commands written in the log files and a vec with information to be used
     /// later by the compaction algorithm about each log file.
-    fn build_index<P>(
-        dir_path: P,
-    ) -> Result<(StdHashMap<String, CommandIndex>, u64, Vec<OldLogInfo>)>
+    fn build_index<P>(dir_path: P) -> Result<(StdHashMap<String, CommandIndex>, u64, u64, u64)>
     where
         P: AsRef<Path>,
     {
         let mut storage_index = StdHashMap::new();
         let mut total_cmds_counter = 0;
-        let mut log_files_data = vec![];
+        let mut curr_log_id = 0;
+        let mut cmd_counter = 0;
 
         for (log_id, log_file_path) in KvStoreDb::list_log_ids_files_sorted(dir_path.as_ref()) {
-            let mut log_file_cmd_counter: u64 = 0;
+            curr_log_id = log_id;
+            cmd_counter = 0;
             let mut log_file = OpenOptions::new()
                 .read(true)
                 .open(log_file_path.as_path())?;
@@ -332,7 +309,7 @@ impl KvStoreDb {
                 match res {
                     Ok(Command::Set { key, value }) => {
                         total_cmds_counter += 1;
-                        log_file_cmd_counter += 1;
+                        cmd_counter += 1;
                         let len = bincode::serialized_size(&Command::Set {
                             key: key.clone(),
                             value,
@@ -348,18 +325,12 @@ impl KvStoreDb {
                     }
                     Ok(Command::Remove { key }) => {
                         total_cmds_counter += 1;
-                        log_file_cmd_counter += 1;
+                        cmd_counter += 1;
                         storage_index.remove(&*key);
                     }
                     Err(err) => match *err {
                         bincode::ErrorKind::Io(ref bincode_io_err) => match bincode_io_err.kind() {
-                            std::io::ErrorKind::UnexpectedEof => {
-                                log_files_data.push(OldLogInfo {
-                                    id: log_id,
-                                    cmd_counter: log_file_cmd_counter,
-                                });
-                                break;
-                            }
+                            std::io::ErrorKind::UnexpectedEof => break,
                             _ => return Err(KvStoreError::from(err)),
                         },
                         _ => return Err(KvStoreError::from(err)),
@@ -367,7 +338,7 @@ impl KvStoreDb {
                 }
             }
         }
-        Ok((storage_index, total_cmds_counter, log_files_data))
+        Ok((storage_index, total_cmds_counter, curr_log_id, cmd_counter))
     }
 
     fn set(&mut self, key: String, value: String) -> Result<()> {
