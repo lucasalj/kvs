@@ -344,14 +344,6 @@ impl KvStoreDb {
     fn set(&mut self, key: String, value: String) -> Result<()> {
         self.insert_entry(key, value)?;
 
-        if self.should_run_compaction() {
-            self.do_compaction()?;
-        }
-
-        if self.should_create_new_file() {
-            self.do_create_new_file()?;
-        }
-
         Ok(())
     }
 
@@ -369,15 +361,6 @@ impl KvStoreDb {
             Err(KvStoreError::RemoveNonExistentKey)
         } else {
             self.write_cmd_to_curr_log(Command::Remove { key })?;
-
-            if self.should_run_compaction() {
-                self.do_compaction()?;
-            }
-
-            if self.should_create_new_file() {
-                self.do_create_new_file()?;
-            }
-
             Ok(())
         }
     }
@@ -449,6 +432,18 @@ impl KvStoreDb {
         );
         Ok(())
     }
+
+    fn compact(&mut self) -> Result<()> {
+        if self.should_create_new_file() {
+            self.do_create_new_file()?;
+        }
+
+        if self.should_run_compaction() {
+            self.do_compaction()?;
+        }
+
+        Ok(())
+    }
 }
 
 impl KvStore {
@@ -482,5 +477,11 @@ impl KvsEngine for KvStore {
 
     fn remove(&self, key: String) -> Result<()> {
         self.db.lock().remove(key)
+    }
+}
+
+impl KvsCompactor for KvStore {
+    fn compact(&self) -> Result<()> {
+        self.db.lock().compact()
     }
 }

@@ -1,3 +1,5 @@
+use crate::KvsCompactor;
+
 use super::{KvStoreError, KvsEngine, Result};
 use itertools::Itertools;
 use sled::{Config, Db};
@@ -26,6 +28,8 @@ impl SledKvsEngine {
         Ok(SledKvsEngine { db })
     }
 }
+
+impl KvsCompactor for SledKvsEngine {}
 
 impl KvsEngine for SledKvsEngine {
     fn set(&self, key: String, value: String) -> Result<()> {

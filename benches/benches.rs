@@ -145,6 +145,35 @@ pub fn sled_read(c: &mut Criterion) {
     read_benchmark(db, "sled_read", c);
 }
 
+fn client_send_cmd_set(
+    client: &'_ KvClient,
+    key: String,
+    value: String,
+    mut attempts: u16,
+) -> std::result::Result<(), KvClientError<'static>> {
+    loop {
+        match client.send_cmd_set(key.clone(), value.clone()) {
+            Ok(()) => return Ok(()),
+            Err(_) if attempts > 0 => attempts -= 1,
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+fn client_send_cmd_get(
+    client: &'_ KvClient,
+    key: String,
+    mut attempts: u16,
+) -> std::result::Result<Option<String>, KvClientError<'static>> {
+    loop {
+        match client.send_cmd_get(key.clone()) {
+            Ok(v) => return Ok(v),
+            Err(_) if attempts > 0 => attempts -= 1,
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 fn write_queued_kvstore(
     b: &mut Bencher,
     threads: &u32,
@@ -201,7 +230,7 @@ fn write_queued_kvstore(
             let client = KvClient::new(server_addr.as_str()).unwrap();
             while let Ok(_) = rx_start.recv() {
                 tx_result
-                    .send(client.send_cmd_set(key.clone(), value.clone()))
+                    .send(client_send_cmd_set(&client, key.clone(), value.clone(), 10))
                     .unwrap();
                 rx_next.recv().unwrap();
             }
@@ -284,7 +313,9 @@ fn read_queued_kvstore(
         clients_thread_pool.spawn(move || {
             let client = KvClient::new(server_addr.as_str()).unwrap();
             while let Ok(_) = rx_start.recv() {
-                tx_result.send(client.send_cmd_get(key.clone())).unwrap();
+                tx_result
+                    .send(client_send_cmd_get(&client, key.clone(), 10))
+                    .unwrap();
                 rx_next.recv().unwrap();
             }
         });
@@ -294,7 +325,7 @@ fn read_queued_kvstore(
     for _ in keys
         .iter()
         .cloned()
-        .map(|key| client.send_cmd_set(key, (*value).clone()).unwrap())
+        .map(|key| client_send_cmd_set(&client, key, (*value).clone(), 10).unwrap())
     {}
 
     // The part that actually matters
@@ -377,7 +408,7 @@ pub fn write_rayon_kvstore(
             let client = KvClient::new(server_addr.as_str()).unwrap();
             while let Ok(_) = rx_start.recv() {
                 tx_result
-                    .send(client.send_cmd_set(key.clone(), value.clone()))
+                    .send(client_send_cmd_set(&client, key.clone(), value.clone(), 10))
                     .unwrap();
                 rx_next.recv().unwrap();
             }
@@ -460,7 +491,9 @@ pub fn read_rayon_kvstore(
         clients_thread_pool.spawn(move || {
             let client = KvClient::new(server_addr.as_str()).unwrap();
             while let Ok(_) = rx_start.recv() {
-                tx_result.send(client.send_cmd_get(key.clone())).unwrap();
+                tx_result
+                    .send(client_send_cmd_get(&client, key.clone(), 10))
+                    .unwrap();
                 rx_next.recv().unwrap();
             }
         });
@@ -470,7 +503,7 @@ pub fn read_rayon_kvstore(
     for _ in keys
         .iter()
         .cloned()
-        .map(|key| client.send_cmd_set(key, (*value).clone()).unwrap())
+        .map(|key| client_send_cmd_set(&client, key, (*value).clone(), 10).unwrap())
     {}
 
     // The part that actually matters
@@ -553,7 +586,7 @@ pub fn write_rayon_sledkvengine(
             let client = KvClient::new(server_addr.as_str()).unwrap();
             while let Ok(_) = rx_start.recv() {
                 tx_result
-                    .send(client.send_cmd_set(key.clone(), value.clone()))
+                    .send(client_send_cmd_set(&client, key.clone(), value.clone(), 10))
                     .unwrap();
                 rx_next.recv().unwrap();
             }
@@ -636,7 +669,9 @@ pub fn read_rayon_sledkvengine(
         clients_thread_pool.spawn(move || {
             let client = KvClient::new(server_addr.as_str()).unwrap();
             while let Ok(_) = rx_start.recv() {
-                tx_result.send(client.send_cmd_get(key.clone())).unwrap();
+                tx_result
+                    .send(client_send_cmd_get(&client, key.clone(), 10))
+                    .unwrap();
                 rx_next.recv().unwrap();
             }
         });
@@ -646,7 +681,7 @@ pub fn read_rayon_sledkvengine(
     for _ in keys
         .iter()
         .cloned()
-        .map(|key| client.send_cmd_set(key, (*value).clone()).unwrap())
+        .map(|key| client_send_cmd_set(&client, key, (*value).clone(), 10).unwrap())
     {}
 
     // The part that actually matters
@@ -675,7 +710,7 @@ pub fn read_rayon_sledkvengine(
 
 pub fn bench_server_write_read(c: &mut Criterion) {
     let inputs = std::iter::successors(Some(1u32), |n| n.checked_mul(2))
-        .take_while(|n| *n <= (2 * num_cpus::get() as u32))
+        .take_while(|n| *n <= (2 * num_cpus::get_physical() as u32))
         .collect::<Vec<u32>>();
 
     const N_CLIENT_THREADS: u32 = 1000;

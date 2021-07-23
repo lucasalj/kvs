@@ -54,3 +54,11 @@ pub trait KvsEngine: Clone + Send + 'static {
     /// ```
     fn remove(&self, key: String) -> Result<()>;
 }
+
+/// Models a database archive compactor
+pub trait KvsCompactor {
+    /// Checks and run compaction strategy
+    fn compact(&self) -> Result<()> {
+        Ok(())
+    }
+}

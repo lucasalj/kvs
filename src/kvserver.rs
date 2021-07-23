@@ -1,3 +1,5 @@
+use crate::KvsCompactor;
+
 use super::{cp::*, kvsengine::KvsEngine, thread_pool::ThreadPool};
 use mio::{
     net::{TcpListener, TcpStream},
@@ -21,6 +23,10 @@ use std::{
 const SERVER_TOKEN: Token = Token(0);
 const SERVER_TIMER_TOKEN: Token = Token(1);
 const SERVER_SIGNALS_TOKEN: Token = Token(2);
+
+const SERVER_TIMER_CHECK_PERIOD: std::time::Duration = std::time::Duration::from_millis(100);
+const SERVER_COMPACTION_PERIOD: std::time::Duration = std::time::Duration::from_secs(5);
+const POLL_ATTEMPTS: u16 = 10;
 
 /// Macro to unwrap the Ok of a result or if Err, log and returns the control flow to the caller
 #[macro_export]
@@ -51,7 +57,7 @@ macro_rules! unwrap_or_return_code1_on_err {
 /// receive commands, directly communicates with the database engine executing each command
 /// and send responses to kvs clients
 #[derive(Debug)]
-pub struct KvServer<Engine: KvsEngine, Tp: ThreadPool> {
+pub struct KvServer<Engine, Tp> {
     db: Engine,
     address: SocketAddr,
     thread_pool: Tp,
@@ -72,13 +78,13 @@ impl KvServerShutdownTrigger {
 
     /// Fires a signal to the server indicating that it must shutdown
     pub fn trigger(&self) -> Result<(), KvServerShutdownTriggerError> {
-        self.0.store(true, Ordering::Relaxed);
+        self.0.store(true, Ordering::Release);
         Ok(())
     }
 
     /// Tells if the signal was fired
     pub fn must_shutdown(&self) -> bool {
-        self.0.load(Ordering::Relaxed)
+        self.0.load(Ordering::Acquire)
     }
 }
 
@@ -165,7 +171,7 @@ impl<'a> Error for KvServerCreationError<'a> {}
 
 impl<Engine, Tp> KvServer<Engine, Tp>
 where
-    Engine: KvsEngine,
+    Engine: KvsEngine + KvsCompactor,
     Tp: ThreadPool,
 {
     /// Creates a new KvServer object given the `engine` type name,
@@ -196,6 +202,24 @@ where
         })
     }
 
+    fn poll(&mut self, poll: &mut Poll, events: &mut Events) -> Result<(), i32> {
+        let mut poll_attempt = POLL_ATTEMPTS;
+        loop {
+            if let Err(e) = poll.poll(events, None) {
+                match e.kind() {
+                    std::io::ErrorKind::Interrupted if poll_attempt > 0 => poll_attempt -= 1,
+                    _ => {
+                        error!(self.logger, "Could not poll the server for events"; "error" => e.to_string());
+                        return Err(1i32);
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     /// Starts listening for connections and enter the forever loop handling server connections
     pub fn run(&mut self) -> Result<(), i32> {
         let mut listener = unwrap_or_return_code1_on_err!(
@@ -216,7 +240,7 @@ where
             "create a timer"
         );
         unwrap_or_return_code1_on_err!(
-            timer.set_timeout_interval(&std::time::Duration::from_millis(100)),
+            timer.set_timeout_interval(&SERVER_TIMER_CHECK_PERIOD),
             self.logger,
             "setup the timer"
         );
@@ -234,13 +258,13 @@ where
                 "register event source: signal handler"
             );
         }
-        let mut events = Events::with_capacity(128);
+        let compaction_timer_check_init =
+            SERVER_COMPACTION_PERIOD.as_millis() / SERVER_TIMER_CHECK_PERIOD.as_millis();
+        let mut compaction_timer_check_count = compaction_timer_check_init;
+        let compactor_running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut events = Events::with_capacity(1024);
         loop {
-            unwrap_or_return_code1_on_err!(
-                poll.poll(&mut events, None),
-                self.logger,
-                "poll the server for events"
-            );
+            self.poll(&mut poll, &mut events)?;
             if self.shutdown_trigger.must_shutdown() {
                 info!(self.logger, "server is shutting down");
                 break;
@@ -318,7 +342,30 @@ where
                             }
                         });
                     }
-                    SERVER_TIMER_TOKEN => {}
+                    SERVER_TIMER_TOKEN => {
+                        if !compactor_running.load(std::sync::atomic::Ordering::Acquire) {
+                            if compaction_timer_check_count == 0 {
+                                let db = self.db.clone();
+                                let logger = self.logger.clone();
+                                let compactor_running = compactor_running.clone();
+                                compactor_running.store(true, std::sync::atomic::Ordering::Release);
+                                self.thread_pool.spawn(move || {
+                                    KvServer::<Engine, Tp>::run_compactor(db, logger);
+                                    compactor_running
+                                        .store(false, std::sync::atomic::Ordering::Release);
+                                });
+                                compaction_timer_check_count = compaction_timer_check_init;
+                            } else {
+                                compaction_timer_check_count -= 1;
+                            }
+                        }
+
+                        unwrap_or_return_code1_on_err!(
+                            timer.set_timeout_interval(&SERVER_TIMER_CHECK_PERIOD),
+                            self.logger,
+                            "setup the timer"
+                        );
+                    }
                     SERVER_SIGNALS_TOKEN => {
                         if let Some(signals) = &mut self.signals {
                             loop {
@@ -371,5 +418,9 @@ where
         let mut payload_buf: SmallVec<[u8; 256]> = smallvec![0; header.payload_length() as usize];
         stream.read_exact(&mut payload_buf)?;
         de::from_bytes(&payload_buf)
+    }
+
+    fn run_compactor(db: Engine, logger: Logger) {
+        unwrap_or_return_on_err!(db.compact(), logger, "run compaction successfully");
     }
 }
