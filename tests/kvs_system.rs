@@ -76,9 +76,8 @@ fn compaction() {
         }
     }
     // Compaction triggered
-    server_shutdown_trigger
-        .trigger()
-        .expect("unable to send shutdown trigger");
+    server_shutdown_trigger.trigger();
+    std::thread::sleep(std::time::Duration::from_secs(1));
     server_join_handle
         .join()
         .expect("unable to join server thread");
@@ -121,9 +120,8 @@ fn compaction() {
             }
         }
     }
-    server_shutdown_trigger
-        .trigger()
-        .expect("unable to send shutdown trigger");
+    server_shutdown_trigger.trigger();
+    std::thread::sleep(std::time::Duration::from_secs(1));
     server_join_handle
         .join()
         .expect("unable to join server thread");

@@ -253,9 +253,8 @@ fn write_queued_kvstore(
         }
     });
 
-    server_shutdown_trigger
-        .trigger()
-        .expect("unable to trigger server shutdown");
+    server_shutdown_trigger.trigger();
+    std::thread::sleep(std::time::Duration::from_secs(1));
     server_join_handle.join().unwrap();
 }
 
@@ -346,9 +345,8 @@ fn read_queued_kvstore(
         }
     });
 
-    server_shutdown_trigger
-        .trigger()
-        .expect("unable to trigger server shutdown");
+    server_shutdown_trigger.trigger();
+    std::thread::sleep(std::time::Duration::from_secs(1));
     server_join_handle.join().unwrap();
 }
 
@@ -431,9 +429,8 @@ pub fn write_rayon_kvstore(
         }
     });
 
-    server_shutdown_trigger
-        .trigger()
-        .expect("unable to trigger server shutdown");
+    server_shutdown_trigger.trigger();
+    std::thread::sleep(std::time::Duration::from_secs(1));
     server_join_handle.join().unwrap();
 }
 
@@ -524,9 +521,8 @@ pub fn read_rayon_kvstore(
         }
     });
 
-    server_shutdown_trigger
-        .trigger()
-        .expect("unable to trigger server shutdown");
+    server_shutdown_trigger.trigger();
+    std::thread::sleep(std::time::Duration::from_secs(1));
     server_join_handle.join().unwrap();
 }
 
@@ -609,9 +605,8 @@ pub fn write_rayon_sledkvengine(
         }
     });
 
-    server_shutdown_trigger
-        .trigger()
-        .expect("unable to trigger server shutdown");
+    server_shutdown_trigger.trigger();
+    std::thread::sleep(std::time::Duration::from_secs(1));
     server_join_handle.join().unwrap();
 }
 
@@ -702,9 +697,8 @@ pub fn read_rayon_sledkvengine(
         }
     });
 
-    server_shutdown_trigger
-        .trigger()
-        .expect("unable to trigger server shutdown");
+    server_shutdown_trigger.trigger();
+    std::thread::sleep(std::time::Duration::from_secs(1));
     server_join_handle.join().unwrap();
 }
 

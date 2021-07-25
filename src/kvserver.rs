@@ -77,37 +77,13 @@ impl KvServerShutdownTrigger {
     }
 
     /// Fires a signal to the server indicating that it must shutdown
-    pub fn trigger(&self) -> Result<(), KvServerShutdownTriggerError> {
+    pub fn trigger(&self) {
         self.0.store(true, Ordering::Release);
-        Ok(())
     }
 
     /// Tells if the signal was fired
     pub fn must_shutdown(&self) -> bool {
         self.0.load(Ordering::Acquire)
-    }
-}
-
-/// An error returned when KvServerShutdownTrigger fails in the process of signaling
-#[derive(Debug)]
-pub enum KvServerShutdownTriggerError {
-    /// Fails to connect to server to force a atomic read from the server
-    TCPConnection(std::io::Error),
-}
-
-impl fmt::Display for KvServerShutdownTriggerError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            KvServerShutdownTriggerError::TCPConnection(e) => f.write_str(e.to_string().as_str()),
-        }
-    }
-}
-
-impl std::error::Error for KvServerShutdownTriggerError {}
-
-impl std::convert::From<std::io::Error> for KvServerShutdownTriggerError {
-    fn from(e: std::io::Error) -> Self {
-        KvServerShutdownTriggerError::TCPConnection(e)
     }
 }
 
