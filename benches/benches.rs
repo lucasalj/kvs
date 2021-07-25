@@ -213,10 +213,7 @@ fn write_queued_kvstore(
     });
 
     let (tx_start, rx_start): (Sender<()>, Receiver<()>) = bounded(n_client_threads as usize);
-    let (tx_result, rx_result): (
-        Sender<std::result::Result<(), KvClientError<'static>>>,
-        Receiver<std::result::Result<(), KvClientError<'static>>>,
-    ) = bounded(n_client_threads as usize);
+    let (tx_result, rx_result): (Sender<bool>, Receiver<bool>) = bounded(n_client_threads as usize);
     let (tx_next, rx_next): (Sender<()>, Receiver<()>) = bounded(n_client_threads as usize);
 
     for i in 0..n_client_threads {
@@ -230,7 +227,7 @@ fn write_queued_kvstore(
             let client = KvClient::new(server_addr.as_str()).unwrap();
             while let Ok(_) = rx_start.recv() {
                 tx_result
-                    .send(client_send_cmd_set(&client, key.clone(), value.clone(), 10))
+                    .send(client_send_cmd_set(&client, key.clone(), value.clone(), 10).is_ok())
                     .unwrap();
                 rx_next.recv().unwrap();
             }
@@ -245,8 +242,7 @@ fn write_queued_kvstore(
             tx_start.send(()).unwrap();
         }
         for _ in 0..n_client_threads {
-            let result = rx_result.recv().unwrap();
-            assert!(result.is_ok(), "error: {}", result.unwrap_err());
+            assert!(rx_result.recv().unwrap());
         }
         for _ in 0..n_client_threads {
             tx_next.send(()).unwrap();
@@ -297,10 +293,7 @@ fn read_queued_kvstore(
     });
 
     let (tx_start, rx_start): (Sender<()>, Receiver<()>) = bounded(n_client_threads as usize);
-    let (tx_result, rx_result): (
-        Sender<std::result::Result<Option<String>, KvClientError<'static>>>,
-        Receiver<std::result::Result<Option<String>, KvClientError<'static>>>,
-    ) = bounded(n_client_threads as usize);
+    let (tx_result, rx_result): (Sender<bool>, Receiver<bool>) = bounded(n_client_threads as usize);
     let (tx_next, rx_next): (Sender<()>, Receiver<()>) = bounded(n_client_threads as usize);
 
     for i in 0..n_client_threads {
@@ -313,7 +306,7 @@ fn read_queued_kvstore(
             let client = KvClient::new(server_addr.as_str()).unwrap();
             while let Ok(_) = rx_start.recv() {
                 tx_result
-                    .send(client_send_cmd_get(&client, key.clone(), 10))
+                    .send(client_send_cmd_get(&client, key.clone(), 10).is_ok())
                     .unwrap();
                 rx_next.recv().unwrap();
             }
@@ -335,10 +328,7 @@ fn read_queued_kvstore(
             tx_start.send(()).unwrap();
         }
         for _ in 0..n_client_threads {
-            match rx_result.recv().unwrap() {
-                Ok(s) => assert_eq!(s, Some((*value).clone())),
-                Err(e) => assert!(false, "{}", e),
-            }
+            assert!(rx_result.recv().unwrap());
         }
         for _ in 0..n_client_threads {
             tx_next.send(()).unwrap();
@@ -389,10 +379,7 @@ pub fn write_rayon_kvstore(
     });
 
     let (tx_start, rx_start): (Sender<()>, Receiver<()>) = bounded(n_client_threads as usize);
-    let (tx_result, rx_result): (
-        Sender<std::result::Result<(), KvClientError<'static>>>,
-        Receiver<std::result::Result<(), KvClientError<'static>>>,
-    ) = bounded(n_client_threads as usize);
+    let (tx_result, rx_result): (Sender<bool>, Receiver<bool>) = bounded(n_client_threads as usize);
     let (tx_next, rx_next): (Sender<()>, Receiver<()>) = bounded(n_client_threads as usize);
 
     for i in 0..n_client_threads {
@@ -406,7 +393,7 @@ pub fn write_rayon_kvstore(
             let client = KvClient::new(server_addr.as_str()).unwrap();
             while let Ok(_) = rx_start.recv() {
                 tx_result
-                    .send(client_send_cmd_set(&client, key.clone(), value.clone(), 10))
+                    .send(client_send_cmd_set(&client, key.clone(), value.clone(), 10).is_ok())
                     .unwrap();
                 rx_next.recv().unwrap();
             }
@@ -421,8 +408,7 @@ pub fn write_rayon_kvstore(
             tx_start.send(()).unwrap();
         }
         for _ in 0..n_client_threads {
-            let result = rx_result.recv().unwrap();
-            assert!(result.is_ok(), "error: {}", result.unwrap_err());
+            assert!(rx_result.recv().unwrap());
         }
         for _ in 0..n_client_threads {
             tx_next.send(()).unwrap();
@@ -473,10 +459,7 @@ pub fn read_rayon_kvstore(
     });
 
     let (tx_start, rx_start): (Sender<()>, Receiver<()>) = bounded(n_client_threads as usize);
-    let (tx_result, rx_result): (
-        Sender<std::result::Result<Option<String>, KvClientError<'static>>>,
-        Receiver<std::result::Result<Option<String>, KvClientError<'static>>>,
-    ) = bounded(n_client_threads as usize);
+    let (tx_result, rx_result): (Sender<bool>, Receiver<bool>) = bounded(n_client_threads as usize);
     let (tx_next, rx_next): (Sender<()>, Receiver<()>) = bounded(n_client_threads as usize);
 
     for i in 0..n_client_threads {
@@ -489,7 +472,7 @@ pub fn read_rayon_kvstore(
             let client = KvClient::new(server_addr.as_str()).unwrap();
             while let Ok(_) = rx_start.recv() {
                 tx_result
-                    .send(client_send_cmd_get(&client, key.clone(), 10))
+                    .send(client_send_cmd_get(&client, key.clone(), 10).is_ok())
                     .unwrap();
                 rx_next.recv().unwrap();
             }
@@ -511,10 +494,7 @@ pub fn read_rayon_kvstore(
             tx_start.send(()).unwrap();
         }
         for _ in 0..n_client_threads {
-            match rx_result.recv().unwrap() {
-                Ok(s) => assert_eq!(s, Some((*value).clone())),
-                Err(e) => assert!(false, "{}", e),
-            }
+            assert!(rx_result.recv().unwrap());
         }
         for _ in 0..n_client_threads {
             tx_next.send(()).unwrap();
@@ -565,10 +545,7 @@ pub fn write_rayon_sledkvengine(
     });
 
     let (tx_start, rx_start): (Sender<()>, Receiver<()>) = bounded(n_client_threads as usize);
-    let (tx_result, rx_result): (
-        Sender<std::result::Result<(), KvClientError<'static>>>,
-        Receiver<std::result::Result<(), KvClientError<'static>>>,
-    ) = bounded(n_client_threads as usize);
+    let (tx_result, rx_result): (Sender<bool>, Receiver<bool>) = bounded(n_client_threads as usize);
     let (tx_next, rx_next): (Sender<()>, Receiver<()>) = bounded(n_client_threads as usize);
 
     for i in 0..n_client_threads {
@@ -582,7 +559,7 @@ pub fn write_rayon_sledkvengine(
             let client = KvClient::new(server_addr.as_str()).unwrap();
             while let Ok(_) = rx_start.recv() {
                 tx_result
-                    .send(client_send_cmd_set(&client, key.clone(), value.clone(), 10))
+                    .send(client_send_cmd_set(&client, key.clone(), value.clone(), 10).is_ok())
                     .unwrap();
                 rx_next.recv().unwrap();
             }
@@ -597,8 +574,7 @@ pub fn write_rayon_sledkvengine(
             tx_start.send(()).unwrap();
         }
         for _ in 0..n_client_threads {
-            let result = rx_result.recv().unwrap();
-            assert!(result.is_ok(), "error: {}", result.unwrap_err());
+            assert!(rx_result.recv().unwrap());
         }
         for _ in 0..n_client_threads {
             tx_next.send(()).unwrap();
@@ -649,10 +625,7 @@ pub fn read_rayon_sledkvengine(
     });
 
     let (tx_start, rx_start): (Sender<()>, Receiver<()>) = bounded(n_client_threads as usize);
-    let (tx_result, rx_result): (
-        Sender<std::result::Result<Option<String>, KvClientError<'static>>>,
-        Receiver<std::result::Result<Option<String>, KvClientError<'static>>>,
-    ) = bounded(n_client_threads as usize);
+    let (tx_result, rx_result): (Sender<bool>, Receiver<bool>) = bounded(n_client_threads as usize);
     let (tx_next, rx_next): (Sender<()>, Receiver<()>) = bounded(n_client_threads as usize);
 
     for i in 0..n_client_threads {
@@ -665,7 +638,7 @@ pub fn read_rayon_sledkvengine(
             let client = KvClient::new(server_addr.as_str()).unwrap();
             while let Ok(_) = rx_start.recv() {
                 tx_result
-                    .send(client_send_cmd_get(&client, key.clone(), 10))
+                    .send(client_send_cmd_get(&client, key.clone(), 10).is_ok())
                     .unwrap();
                 rx_next.recv().unwrap();
             }
@@ -687,10 +660,7 @@ pub fn read_rayon_sledkvengine(
             tx_start.send(()).unwrap();
         }
         for _ in 0..n_client_threads {
-            match rx_result.recv().unwrap() {
-                Ok(s) => assert_eq!(s, Some((*value).clone())),
-                Err(e) => assert!(false, "{}", e),
-            }
+            assert!(rx_result.recv().unwrap());
         }
         for _ in 0..n_client_threads {
             tx_next.send(()).unwrap();

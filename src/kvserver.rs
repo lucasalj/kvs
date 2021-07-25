@@ -247,7 +247,7 @@ where
             }
             for event in events.iter() {
                 match event.token() {
-                    SERVER_TOKEN => {
+                    SERVER_TOKEN => loop {
                         let log_server = self.logger.clone();
                         let db = self.db.clone();
                         let (mut stream, peer_addr) = match listener.accept() {
@@ -317,7 +317,7 @@ where
                                 }
                             }
                         });
-                    }
+                    },
                     SERVER_TIMER_TOKEN => {
                         if !compactor_running.load(std::sync::atomic::Ordering::Acquire) {
                             if compaction_timer_check_count == 0 {
