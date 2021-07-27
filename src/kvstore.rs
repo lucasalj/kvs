@@ -1,7 +1,9 @@
 use super::*;
+use crossbeam_epoch::{Atomic, Owned};
+use flurry::{epoch::Guard, HashMap as FlurryHashMap};
 use itertools::Itertools;
 use kvsengine::KvsEngine;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, MutexGuard};
 use positioned_io::ReadAt;
 use serde::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};
@@ -10,9 +12,10 @@ use std::{
     fmt::Debug,
     fs::{self, File, OpenOptions},
     io::{BufReader, Seek, SeekFrom, Write},
+    iter::FromIterator,
     path::{Path, PathBuf},
     result,
-    sync::Arc,
+    sync::{atomic::AtomicI64, atomic::Ordering, Arc},
 };
 use walkdir::WalkDir;
 
@@ -35,16 +38,11 @@ const CURR_FILE_OFFSET_THRESHOLD: u64 = 1073741824;
 /// Data structure that implements a persistent key-value store
 #[derive(Debug, Clone)]
 pub struct KvStore {
-    db: Arc<Mutex<Box<KvStoreDb>>>,
-}
-
-#[derive(Debug)]
-struct KvStoreDb {
-    storage_index: StdHashMap<String, CommandIndex>,
+    storage_index: Arc<FlurryHashMap<String, CommandIndex>>,
     log_dir_path: PathBuf,
-    curr_log_w: LogFileWriter,
-    curr_log_r: LogFileReader,
-    total_cmd_counter: u64,
+    writer_ctrl: Arc<Mutex<WriterControlData>>,
+    curr_log_r: Atomic<LogFileReader>,
+    last_collected_file_index: Arc<AtomicI64>,
 }
 
 /// An alias for the result type that includes the common error type
@@ -63,6 +61,13 @@ struct CommandIndex {
     log_id: u64,
     offset: u64,
     len: u64,
+}
+
+/// Data structure managed by writers
+#[derive(Debug)]
+struct WriterControlData {
+    curr_log: LogFileWriter,
+    total_cmd_counter: u64,
 }
 
 /// Information about the current log file writer
@@ -97,6 +102,20 @@ impl LogFileWriter {
             cmd_counter,
             offset,
         })
+    }
+
+    fn open_another<P>(&mut self, id: u64, log_path: P) -> Result<()>
+    where
+        P: AsRef<Path>,
+    {
+        self.id = id;
+        self.writer = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_path.as_ref())?;
+        self.cmd_counter = 0;
+        self.offset = 0;
+        Ok(())
     }
 
     /// Get the log file writer's id.
@@ -151,7 +170,34 @@ impl LogFileReader {
     }
 }
 
-impl KvStoreDb {
+impl WriterControlData {
+    fn new(curr_log: LogFileWriter, total_cmd_counter: u64) -> Self {
+        Self {
+            curr_log,
+            total_cmd_counter,
+        }
+    }
+
+    /// Get a reference to the writer control data's total cmd counter.
+    fn total_cmd_counter(&self) -> u64 {
+        self.total_cmd_counter
+    }
+
+    /// Get a mutable reference to the writer control data's curr log.
+    fn curr_log_mut(&mut self) -> &mut LogFileWriter {
+        &mut self.curr_log
+    }
+
+    fn inc_total_cmd_counter(&mut self) {
+        self.total_cmd_counter += 1;
+    }
+
+    fn sub_total_cmd_counter(&mut self, val: u64) {
+        self.total_cmd_counter -= val;
+    }
+}
+
+impl KvStore {
     /// Open the KvStore at a given `path`.
     /// Return the KvStore.
     ///
@@ -168,40 +214,57 @@ impl KvStoreDb {
         let log_dir_path = (path.into() as PathBuf).canonicalize()?.join("");
 
         let (storage_index, total_cmd_counter, log_id, cmd_counter) =
-            KvStoreDb::build_index(log_dir_path.as_path())?;
+            KvStore::build_index(log_dir_path.as_path())?;
 
-        let file_path = KvStoreDb::format_log_path(log_dir_path.as_path(), log_id);
+        let file_path = KvStore::format_log_path(log_dir_path.as_path(), log_id);
         let curr_log_w = LogFileWriter::open(log_id, file_path.as_path(), cmd_counter)?;
-        let curr_log_r = LogFileReader::open(log_id, file_path.as_path())?;
+        let writer_ctrl = Arc::new(Mutex::new(WriterControlData::new(
+            curr_log_w,
+            total_cmd_counter,
+        )));
+        let curr_log_r = Atomic::new(LogFileReader::open(log_id, file_path.as_path())?);
+        let storage_index = Arc::new(FlurryHashMap::from_iter(storage_index.into_iter()));
+        let last_collected_file_index = Arc::new(AtomicI64::new(log_id as i64 - 1));
 
-        Ok(KvStoreDb {
+        Ok(KvStore {
             storage_index,
             log_dir_path,
-            curr_log_w,
+            writer_ctrl,
             curr_log_r,
-            total_cmd_counter,
+            last_collected_file_index,
         })
     }
 
     /// Check if it should run compaction algorithm
-    fn should_run_compaction(&self) -> bool {
-        self.total_cmd_counter > CMDS_THRESHOLD
-            && ((self.total_cmd_counter / (self.storage_index.len() as u64)) as f64)
+    fn should_run_compaction<'g>(
+        &self,
+        writer_ctrl: &'_ mut MutexGuard<'g, WriterControlData>,
+    ) -> bool {
+        writer_ctrl.total_cmd_counter() > CMDS_THRESHOLD
+            && ((writer_ctrl.total_cmd_counter() / (self.storage_index.len() as u64)) as f64)
                 > CMD_KEY_FACTOR
     }
 
     /// Check if it should create a new log file
-    fn should_create_new_file(&self) -> bool {
-        self.curr_log_w.offset() > CURR_FILE_OFFSET_THRESHOLD
-            || self.curr_log_w.cmd_counter() > (CMDS_THRESHOLD / 2)
+    fn should_create_new_file<'g>(
+        &self,
+        writer_ctrl: &'_ mut MutexGuard<'g, WriterControlData>,
+    ) -> bool {
+        let curr_log = writer_ctrl.curr_log_mut();
+        curr_log.offset() > CURR_FILE_OFFSET_THRESHOLD
+            || curr_log.cmd_counter() > (CMDS_THRESHOLD / 2)
     }
 
     /// Create a new log following the format for log file name and save the current log file information
     /// in memory.
-    fn do_create_new_file(&mut self) -> Result<()> {
-        let new_file_id = self.curr_log_w.id() + 1;
-        let new_file_path = KvStoreDb::format_log_path(self.log_dir_path.as_path(), new_file_id);
-        self.curr_log_w = LogFileWriter::open(new_file_id, new_file_path, 0)?;
+    fn do_create_new_file<'g>(
+        &self,
+        writer_ctrl: &'_ mut MutexGuard<'g, WriterControlData>,
+    ) -> Result<()> {
+        let curr_log = writer_ctrl.curr_log_mut();
+        let new_file_id = curr_log.id() + 1;
+        let new_file_path = KvStore::format_log_path(self.log_dir_path.as_path(), new_file_id);
+        curr_log.open_another(new_file_id, new_file_path)?;
         Ok(())
     }
 
@@ -211,12 +274,19 @@ impl KvStoreDb {
     ///     2. List all the log file names and ids in the database directory sorted by name.
     ///     3. For each file read all of its commands, if the command is a set and refers to an active entry, write it down to
     ///        the current log and after processing all of the file commands, delete the file.
-    fn do_compaction(&mut self) -> Result<()> {
-        let active_file_id_offsets_map = self.get_active_file_id_offsets_map();
-        let curr_log_id = self.curr_log_w.id();
+    fn do_compaction<'g>(
+        &self,
+        writer_ctrl: &'_ mut MutexGuard<'g, WriterControlData>,
+    ) -> Result<()> {
+        let index_guard = &self.storage_index.guard();
+        let curr_log = writer_ctrl.curr_log_mut();
+        let active_file_id_offsets_map = self.get_active_file_id_offsets_map(index_guard);
+        let curr_log_id = curr_log.id();
 
-        let log_ids_files = KvStoreDb::list_log_ids_files_sorted(self.log_dir_path.as_path())
-            .filter(|(id, _)| *id < curr_log_id)
+        let last_collected_file_index = self.last_collected_file_index.load(Ordering::SeqCst);
+
+        let log_ids_files = KvStore::list_log_ids_files_sorted(self.log_dir_path.as_path())
+            .filter(|(id, _)| *id < curr_log_id && (*id as i64) > last_collected_file_index)
             .collect::<Vec<_>>();
 
         for (log_id, log_path) in log_ids_files {
@@ -237,7 +307,7 @@ impl KvStoreDb {
                         Ok(Command::Set { key, value }) => {
                             log_file_cmd_counter += 1;
                             if is_active_entry {
-                                self.insert_entry(key, value)?;
+                                self.insert_entry(key, value, writer_ctrl)?;
                             }
                         }
                         Ok(Command::Remove { key: _ }) => {
@@ -254,28 +324,45 @@ impl KvStoreDb {
                         },
                     }
                 }
-                self.total_cmd_counter -= log_file_cmd_counter;
+                writer_ctrl.sub_total_cmd_counter(log_file_cmd_counter);
             }
-            fs::remove_file(log_path.as_path())?;
+            self.last_collected_file_index
+                .store(log_id as i64, Ordering::SeqCst);
+            index_guard.defer(move || fs::remove_file(log_path.as_path()).unwrap());
         }
 
         Ok(())
     }
 
     /// Serializes the command using bincode crate and write it down to the current log
-    fn write_cmd_to_curr_log(&mut self, cmd: Command) -> Result<u64> {
-        let nbytes = self.curr_log_w.append_cmd(cmd)?;
-        self.total_cmd_counter += 1;
+    fn write_cmd_to_curr_log<'g>(
+        &self,
+        cmd: Command,
+        writer_ctrl: &'_ mut MutexGuard<'g, WriterControlData>,
+    ) -> Result<u64> {
+        let curr_log = writer_ctrl.curr_log_mut();
+        let nbytes = curr_log.append_cmd(cmd)?;
+        writer_ctrl.inc_total_cmd_counter();
         Ok(nbytes)
     }
 
     /// Given a file name and an offset, access that position in the log file and returns the value if found.
-    fn read_value_from_log_at(&mut self, log_id: u64, offset: u64, len: u64) -> Result<String> {
-        if log_id != self.curr_log_r.id() {
-            let file_path = KvStoreDb::format_log_path(self.log_dir_path.as_path(), log_id);
-            self.curr_log_r = LogFileReader::open(log_id, file_path)?;
+    fn read_value_from_log_at(
+        &self,
+        log_id: u64,
+        offset: u64,
+        len: u64,
+        guard: &'_ Guard,
+    ) -> Result<String> {
+        let curr_log_r = unsafe { self.curr_log_r.load(Ordering::SeqCst, guard).deref() };
+        if log_id != curr_log_r.id() {
+            let file_path = KvStore::format_log_path(self.log_dir_path.as_path(), log_id);
+            self.curr_log_r.store(
+                Owned::new(LogFileReader::open(log_id, file_path)?),
+                Ordering::SeqCst,
+            );
         }
-        let cmd = self.curr_log_r.read_cmd_at(offset, len)?;
+        let cmd = curr_log_r.read_cmd_at(offset, len)?;
         if let Command::Set { key: _, value } = cmd {
             Ok(value)
         } else {
@@ -295,7 +382,7 @@ impl KvStoreDb {
         let mut curr_log_id = 0;
         let mut cmd_counter = 0;
 
-        for (log_id, log_file_path) in KvStoreDb::list_log_ids_files_sorted(dir_path.as_ref()) {
+        for (log_id, log_file_path) in KvStore::list_log_ids_files_sorted(dir_path.as_ref()) {
             curr_log_id = log_id;
             cmd_counter = 0;
             let mut log_file = OpenOptions::new()
@@ -341,26 +428,33 @@ impl KvStoreDb {
         Ok((storage_index, total_cmds_counter, curr_log_id, cmd_counter))
     }
 
-    fn set(&mut self, key: String, value: String) -> Result<()> {
-        self.insert_entry(key, value)?;
+    fn _set(&self, key: String, value: String) -> Result<()> {
+        let writer_ctrl = &mut self.writer_ctrl.lock();
+        self.insert_entry(key, value, writer_ctrl)?;
 
         Ok(())
     }
 
-    fn get(&mut self, key: String) -> Result<Option<String>> {
-        match self.storage_index.get(&key).cloned() {
-            Some(ci) => Ok(Some(
-                self.read_value_from_log_at(ci.log_id, ci.offset, ci.len)?,
-            )),
+    fn _get(&self, key: String) -> Result<Option<String>> {
+        let index_guard = &self.storage_index.guard();
+        match self.storage_index.get(&key, index_guard).cloned() {
+            Some(ci) => Ok(Some(self.read_value_from_log_at(
+                ci.log_id,
+                ci.offset,
+                ci.len,
+                index_guard,
+            )?)),
             None => Ok(None),
         }
     }
 
-    fn remove(&mut self, key: String) -> Result<()> {
-        if let None = self.storage_index.remove(&key) {
+    fn _remove(&self, key: String) -> Result<()> {
+        let curr_low_w = &mut self.writer_ctrl.lock();
+        let index_guard = &self.storage_index.guard();
+        if let None = self.storage_index.remove(&key, index_guard) {
             Err(KvStoreError::RemoveNonExistentKey)
         } else {
-            self.write_cmd_to_curr_log(Command::Remove { key })?;
+            self.write_cmd_to_curr_log(Command::Remove { key }, curr_low_w)?;
             Ok(())
         }
     }
@@ -404,9 +498,12 @@ impl KvStoreDb {
             })
     }
 
-    fn get_active_file_id_offsets_map(&self) -> StdHashMap<u64, StdHashSet<u64>> {
+    fn get_active_file_id_offsets_map(
+        &self,
+        index_guard: &'_ Guard,
+    ) -> StdHashMap<u64, StdHashSet<u64>> {
         self.storage_index
-            .values()
+            .values(index_guard)
             .sorted_by(|i1, i2| Ord::cmp(&i1.log_id, &i2.log_id))
             .group_by(|i1| i1.log_id)
             .into_iter()
@@ -414,14 +511,21 @@ impl KvStoreDb {
             .collect::<StdHashMap<_, _>>()
     }
 
-    fn insert_entry(&mut self, key: String, value: String) -> Result<()> {
-        let log_id = self.curr_log_w.id();
-        let offset = self.curr_log_w.offset();
+    fn insert_entry<'g>(
+        &self,
+        key: String,
+        value: String,
+        writer_ctrl: &'_ mut MutexGuard<'g, WriterControlData>,
+    ) -> Result<()> {
+        let curr_log = writer_ctrl.curr_log_mut();
+        let log_id = curr_log.id();
+        let offset = curr_log.offset();
         let cmd = Command::Set {
             key: key.clone(),
             value,
         };
-        let len = self.write_cmd_to_curr_log(cmd)?;
+        let len = self.write_cmd_to_curr_log(cmd, writer_ctrl)?;
+        let index_guard = &self.storage_index.guard();
         self.storage_index.insert(
             key,
             CommandIndex {
@@ -429,59 +533,41 @@ impl KvStoreDb {
                 offset,
                 len,
             },
+            index_guard,
         );
         Ok(())
     }
 
-    fn compact(&mut self) -> Result<()> {
-        if self.should_create_new_file() {
-            self.do_create_new_file()?;
+    fn _compact(&self) -> Result<()> {
+        let writer_ctrl = &mut self.writer_ctrl.lock();
+        if self.should_create_new_file(writer_ctrl) {
+            self.do_create_new_file(writer_ctrl)?;
         }
 
-        if self.should_run_compaction() {
-            self.do_compaction()?;
+        if self.should_run_compaction(writer_ctrl) {
+            self.do_compaction(writer_ctrl)?;
         }
 
         Ok(())
-    }
-}
-
-impl KvStore {
-    /// Open the KvStore at a given `path`.
-    /// Return the KvStore.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use kvs::KvStore;
-    /// let dictionary = KvStore::open("./").unwrap();
-    /// ```
-    pub fn open<P>(path: P) -> Result<Self>
-    where
-        P: Into<PathBuf>,
-    {
-        Ok(KvStore {
-            db: Arc::new(Mutex::new(Box::new(KvStoreDb::open(path)?))),
-        })
     }
 }
 
 impl KvsEngine for KvStore {
     fn set(&self, key: String, value: String) -> Result<()> {
-        self.db.lock().set(key, value)
+        self._set(key, value)
     }
 
     fn get(&self, key: String) -> Result<Option<String>> {
-        self.db.lock().get(key)
+        self._get(key)
     }
 
     fn remove(&self, key: String) -> Result<()> {
-        self.db.lock().remove(key)
+        self._remove(key)
     }
 }
 
 impl KvsCompactor for KvStore {
     fn compact(&self) -> Result<()> {
-        self.db.lock().compact()
+        self._compact()
     }
 }
