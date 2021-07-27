@@ -2,6 +2,7 @@ use criterion::*;
 use crossbeam::channel::{bounded, Receiver, Sender};
 use kvs::thread_pool::RayonThreadPool;
 use kvs::thread_pool::{SharedQueueThreadPool, ThreadPool};
+use kvs::*;
 use rand::distributions::Alphanumeric;
 use rand::prelude::*;
 use slog::o;
@@ -10,7 +11,8 @@ use std::iter::repeat;
 use std::rc::Rc;
 use tempfile::TempDir;
 
-use kvs::*;
+const CLIENT_SEND_CMD_SET_ATTEMPTS: u16 = 10000;
+const CLIENT_SEND_CMD_GET_ATTEMPTS: u16 = 10000;
 
 fn write_benchmark<E: 'static + KvsEngine>(db: E, name: &str, c: &mut Criterion) {
     const TIMES: usize = 100;
@@ -227,7 +229,15 @@ fn write_queued_kvstore(
             let client = KvClient::new(server_addr.as_str()).unwrap();
             while let Ok(_) = rx_start.recv() {
                 tx_result
-                    .send(client_send_cmd_set(&client, key.clone(), value.clone(), 10).is_ok())
+                    .send(
+                        client_send_cmd_set(
+                            &client,
+                            key.clone(),
+                            value.clone(),
+                            CLIENT_SEND_CMD_SET_ATTEMPTS,
+                        )
+                        .is_ok(),
+                    )
                     .unwrap();
                 rx_next.recv().unwrap();
             }
@@ -306,7 +316,10 @@ fn read_queued_kvstore(
             let client = KvClient::new(server_addr.as_str()).unwrap();
             while let Ok(_) = rx_start.recv() {
                 tx_result
-                    .send(client_send_cmd_get(&client, key.clone(), 10).is_ok())
+                    .send(
+                        client_send_cmd_get(&client, key.clone(), CLIENT_SEND_CMD_GET_ATTEMPTS)
+                            .is_ok(),
+                    )
                     .unwrap();
                 rx_next.recv().unwrap();
             }
@@ -314,11 +327,9 @@ fn read_queued_kvstore(
     }
 
     let client = KvClient::new(server_addr.as_str()).unwrap();
-    for _ in keys
-        .iter()
-        .cloned()
-        .map(|key| client_send_cmd_set(&client, key, (*value).clone(), 10).unwrap())
-    {}
+    keys.iter().cloned().for_each(|key| {
+        client_send_cmd_set(&client, key, (*value).clone(), CLIENT_SEND_CMD_SET_ATTEMPTS).unwrap()
+    });
 
     // The part that actually matters
     // Enable the client threads to start sending requests
@@ -393,7 +404,15 @@ pub fn write_rayon_kvstore(
             let client = KvClient::new(server_addr.as_str()).unwrap();
             while let Ok(_) = rx_start.recv() {
                 tx_result
-                    .send(client_send_cmd_set(&client, key.clone(), value.clone(), 10).is_ok())
+                    .send(
+                        client_send_cmd_set(
+                            &client,
+                            key.clone(),
+                            value.clone(),
+                            CLIENT_SEND_CMD_SET_ATTEMPTS,
+                        )
+                        .is_ok(),
+                    )
                     .unwrap();
                 rx_next.recv().unwrap();
             }
@@ -472,7 +491,10 @@ pub fn read_rayon_kvstore(
             let client = KvClient::new(server_addr.as_str()).unwrap();
             while let Ok(_) = rx_start.recv() {
                 tx_result
-                    .send(client_send_cmd_get(&client, key.clone(), 10).is_ok())
+                    .send(
+                        client_send_cmd_get(&client, key.clone(), CLIENT_SEND_CMD_GET_ATTEMPTS)
+                            .is_ok(),
+                    )
                     .unwrap();
                 rx_next.recv().unwrap();
             }
@@ -480,11 +502,9 @@ pub fn read_rayon_kvstore(
     }
 
     let client = KvClient::new(server_addr.as_str()).unwrap();
-    for _ in keys
-        .iter()
-        .cloned()
-        .map(|key| client_send_cmd_set(&client, key, (*value).clone(), 10).unwrap())
-    {}
+    keys.iter().cloned().for_each(|key| {
+        client_send_cmd_set(&client, key, (*value).clone(), CLIENT_SEND_CMD_SET_ATTEMPTS).unwrap()
+    });
 
     // The part that actually matters
     // Enable the client threads to start sending requests
@@ -559,7 +579,15 @@ pub fn write_rayon_sledkvengine(
             let client = KvClient::new(server_addr.as_str()).unwrap();
             while let Ok(_) = rx_start.recv() {
                 tx_result
-                    .send(client_send_cmd_set(&client, key.clone(), value.clone(), 10).is_ok())
+                    .send(
+                        client_send_cmd_set(
+                            &client,
+                            key.clone(),
+                            value.clone(),
+                            CLIENT_SEND_CMD_SET_ATTEMPTS,
+                        )
+                        .is_ok(),
+                    )
                     .unwrap();
                 rx_next.recv().unwrap();
             }
@@ -638,7 +666,10 @@ pub fn read_rayon_sledkvengine(
             let client = KvClient::new(server_addr.as_str()).unwrap();
             while let Ok(_) = rx_start.recv() {
                 tx_result
-                    .send(client_send_cmd_get(&client, key.clone(), 10).is_ok())
+                    .send(
+                        client_send_cmd_get(&client, key.clone(), CLIENT_SEND_CMD_GET_ATTEMPTS)
+                            .is_ok(),
+                    )
                     .unwrap();
                 rx_next.recv().unwrap();
             }
@@ -646,11 +677,9 @@ pub fn read_rayon_sledkvengine(
     }
 
     let client = KvClient::new(server_addr.as_str()).unwrap();
-    for _ in keys
-        .iter()
-        .cloned()
-        .map(|key| client_send_cmd_set(&client, key, (*value).clone(), 10).unwrap())
-    {}
+    keys.iter().cloned().for_each(|key| {
+        client_send_cmd_set(&client, key, (*value).clone(), CLIENT_SEND_CMD_SET_ATTEMPTS).unwrap()
+    });
 
     // The part that actually matters
     // Enable the client threads to start sending requests
