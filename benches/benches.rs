@@ -213,6 +213,7 @@ fn write_queued_kvstore(
     let server_join_handle = std::thread::spawn(move || {
         server.run().expect("server stopped with an error");
     });
+    std::thread::sleep(std::time::Duration::from_secs(1));
 
     let (tx_start, rx_start): (Sender<()>, Receiver<()>) = bounded(n_client_threads as usize);
     let (tx_result, rx_result): (Sender<bool>, Receiver<bool>) = bounded(n_client_threads as usize);
@@ -301,6 +302,7 @@ fn read_queued_kvstore(
     let server_join_handle = std::thread::spawn(move || {
         server.run().expect("server stopped with an error");
     });
+    std::thread::sleep(std::time::Duration::from_secs(1));
 
     let (tx_start, rx_start): (Sender<()>, Receiver<()>) = bounded(n_client_threads as usize);
     let (tx_result, rx_result): (Sender<bool>, Receiver<bool>) = bounded(n_client_threads as usize);
@@ -388,6 +390,7 @@ pub fn write_rayon_kvstore(
     let server_join_handle = std::thread::spawn(move || {
         server.run().expect("server stopped with an error");
     });
+    std::thread::sleep(std::time::Duration::from_secs(1));
 
     let (tx_start, rx_start): (Sender<()>, Receiver<()>) = bounded(n_client_threads as usize);
     let (tx_result, rx_result): (Sender<bool>, Receiver<bool>) = bounded(n_client_threads as usize);
@@ -476,6 +479,7 @@ pub fn read_rayon_kvstore(
     let server_join_handle = std::thread::spawn(move || {
         server.run().expect("server stopped with an error");
     });
+    std::thread::sleep(std::time::Duration::from_secs(1));
 
     let (tx_start, rx_start): (Sender<()>, Receiver<()>) = bounded(n_client_threads as usize);
     let (tx_result, rx_result): (Sender<bool>, Receiver<bool>) = bounded(n_client_threads as usize);
@@ -563,6 +567,7 @@ pub fn write_rayon_sledkvengine(
     let server_join_handle = std::thread::spawn(move || {
         server.run().expect("server stopped with an error");
     });
+    std::thread::sleep(std::time::Duration::from_secs(1));
 
     let (tx_start, rx_start): (Sender<()>, Receiver<()>) = bounded(n_client_threads as usize);
     let (tx_result, rx_result): (Sender<bool>, Receiver<bool>) = bounded(n_client_threads as usize);
@@ -651,6 +656,7 @@ pub fn read_rayon_sledkvengine(
     let server_join_handle = std::thread::spawn(move || {
         server.run().expect("server stopped with an error");
     });
+    std::thread::sleep(std::time::Duration::from_secs(1));
 
     let (tx_start, rx_start): (Sender<()>, Receiver<()>) = bounded(n_client_threads as usize);
     let (tx_result, rx_result): (Sender<bool>, Receiver<bool>) = bounded(n_client_threads as usize);
@@ -701,7 +707,24 @@ pub fn read_rayon_sledkvengine(
     server_join_handle.join().unwrap();
 }
 
+pub fn set_max_open_file_limit() {
+    let open_files_limit: Box<libc::rlimit> = Box::new(libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    });
+    let rlim: *mut libc::rlimit = Box::into_raw(open_files_limit);
+    let res = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, rlim) };
+    assert_eq!(res, 0, "{}", std::io::Error::last_os_error().to_string());
+
+    unsafe { (*rlim).rlim_cur = (*rlim).rlim_max };
+    unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, rlim) };
+    assert_eq!(res, 0, "{}", std::io::Error::last_os_error().to_string());
+
+    let _ = unsafe { Box::from_raw(rlim) };
+}
+
 pub fn bench_server_write_read(c: &mut Criterion) {
+    set_max_open_file_limit();
     let inputs = std::iter::successors(Some(1u32), |n| n.checked_mul(2))
         .take_while(|n| *n <= (2 * num_cpus::get_physical() as u32))
         .collect::<Vec<u32>>();
